@@ -22,6 +22,25 @@ fi
 
 mkdir -p "$CACHE" "$BINDIR"
 
+LOCKDIR="${CACHE}/ollama-install.lockdir"
+acquire_lock() {
+  if mkdir "$LOCKDIR" 2>/dev/null; then
+    echo $$ >"$LOCKDIR/pid"
+    return 0
+  fi
+  oldpid=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
+  if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    echo "install already running pid=$oldpid"
+    exit 0
+  fi
+  echo "stale install lock; replacing"
+  rm -rf "$LOCKDIR"
+  mkdir "$LOCKDIR"
+  echo $$ >"$LOCKDIR/pid"
+}
+acquire_lock
+trap 'rm -rf "$LOCKDIR"' EXIT INT TERM
+
 if [ -x "${BINDIR}/ollama" ]; then
   echo "already have ${BINDIR}/ollama"
   "${BINDIR}/ollama" --version || true

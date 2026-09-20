@@ -178,6 +178,14 @@ class MigrateLockScheduleTests(unittest.TestCase):
         self.assertIn("xiaomao-scan.sh", joined)
         self.assertNotIn("daily", joined)
         self.assertNotIn("with-model", joined)
+        script = Path(__file__).resolve().parents[1] / "scripts" / "xiaomao-scan.sh"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("scan --project", text)
+        self.assertNotIn("with-model", text)
+        self.assertNotIn("daily", text)
+        exec_line = [ln for ln in text.splitlines() if ln.startswith("exec ")][-1]
+        self.assertIn("scan --project", exec_line)
+        self.assertNotIn("eval", exec_line)
 
 
 class GitReadonlyBusinessContractTests(unittest.TestCase):

@@ -21,8 +21,12 @@ fi
 
 echo "=== tags ==="
 "$BIN" list
-echo "=== generate (keep_alive=0) ==="
-"$BIN" run --keepalive 0s gemma4:12b "用一句话说明你没有 shell。只输出一句中文。"
+echo "=== generate (keep_alive=0 num_ctx=8192) ==="
+# Pin 8192: serve log may advertise a vram-based default_num_ctx of 262144.
+curl -sS --max-time 180 http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gemma4:12b","stream":false,"keep_alive":0,"options":{"num_ctx":8192,"num_predict":64},"messages":[{"role":"user","content":"用一句话说明你没有 shell。只输出一句中文。"}]}'
+echo
 echo "=== stop ==="
 "$BIN" stop gemma4:12b || true
 echo "=== ps ==="

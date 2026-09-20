@@ -145,7 +145,9 @@ def _warnings(cfg: AppConfig, data_bytes: int) -> list[str]:
         warns.append("尚未写入外盘 Volume UUID，卸载后仅靠路径名不够安全")
     elif vol["status"] == "unknown":
         warns.append(f"无法读取外盘 UUID：{vol['note']}")
-    if which("ollama") is None:
+    from xiaomao.ollama_runtime import ollama_bin
+
+    if ollama_bin() is None:
         warns.append("Ollama 未安装（阶段 1 可接受）")
     for project in cfg.projects:
         for wt in project.worktrees:
