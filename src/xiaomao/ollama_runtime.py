@@ -234,6 +234,33 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
         idx = brace + 1
 
 
+def chat_json_payload(
+    cfg: AppConfig,
+    *,
+    model: str,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Chat body for structured JSON. think is top-level, never inside options."""
+    return {
+        "model": model,
+        "stream": False,
+        "keep_alive": 0,
+        "think": False,
+        "format": schema,
+        "options": {
+            "num_ctx": int(cfg.context_length),
+            "num_predict": 2048,
+            "temperature": 0,
+        },
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+
+
 class OllamaClient:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -248,22 +275,9 @@ class OllamaClient:
         timeout: float = 180.0,
     ) -> dict[str, Any]:
         models_dir_allowed(self.cfg)
-        payload = {
-            "model": model,
-            "stream": False,
-            "keep_alive": 0,
-            "think": False,
-            "format": schema,
-            "options": {
-                "num_ctx": int(self.cfg.context_length),
-                "num_predict": 2048,
-                "temperature": 0,
-            },
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
+        payload = chat_json_payload(
+            self.cfg, model=model, system=system, user=user, schema=schema
+        )
         raw = api_post(self.cfg, "/api/chat", payload, timeout=timeout)
         content = ""
         thinking = ""

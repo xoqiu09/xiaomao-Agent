@@ -140,6 +140,26 @@ class SummarizeTests(unittest.TestCase):
         # Extraction must not invent a payload; leftover prose stays invalid.
         self.assertIsNone(extract_json_object("测试通过，已上线"))
 
+    def test_chat_json_payload_disables_think(self) -> None:
+        from xiaomao.config import default_config
+        from xiaomao.ollama_runtime import chat_json_payload
+        from xiaomao.summarize import JSON_SCHEMA
+
+        cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        payload = chat_json_payload(
+            cfg,
+            model="qwen3.6:35b",
+            system="sys",
+            user="user",
+            schema=JSON_SCHEMA,
+        )
+        self.assertIs(payload["think"], False)
+        self.assertNotIn("think", payload["options"])
+        self.assertEqual(payload["options"]["num_ctx"], cfg.context_length)
+        self.assertEqual(payload["options"]["num_predict"], 2048)
+        self.assertEqual(payload["keep_alive"], 0)
+        self.assertEqual(payload["format"], JSON_SCHEMA)
+
 
 class MigrateLockScheduleTests(unittest.TestCase):
     def test_backup_sqlite_is_consistent(self) -> None:
