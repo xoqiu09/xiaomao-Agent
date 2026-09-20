@@ -272,7 +272,7 @@ class OllamaClient:
         system: str,
         user: str,
         schema: dict[str, Any],
-        timeout: float = 180.0,
+        timeout: float = 300.0,
     ) -> dict[str, Any]:
         models_dir_allowed(self.cfg)
         payload = chat_json_payload(
