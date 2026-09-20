@@ -63,7 +63,9 @@ def _sqlite_info() -> dict[str, Any]:
 
 
 def _ollama_info(cfg: AppConfig) -> dict[str, Any]:
-    path = which("ollama")
+    from xiaomao.ollama_runtime import ollama_bin
+
+    path = ollama_bin() or which("ollama")
     app = Path("/Applications/Ollama.app").exists()
     reachable = ollama_reachable(cfg.ollama_host)
     models_dir = Path(cfg.external.models_dir)

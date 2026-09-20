@@ -13,7 +13,7 @@ from xiaomao.config import default_config, save_config
 from xiaomao.eval_runner import self_check_validators
 from xiaomao.eval_samples import samples
 from xiaomao.lock import ScanLock
-from xiaomao.migrate import backup_sqlite
+from xiaomao.migrate import backup_sqlite, migrate_models_dir
 from xiaomao.schedule import START_INTERVAL_SECONDS, plist_payload
 from xiaomao.store import open_db
 from xiaomao.summarize import degrade_note, summarize_or_degrade, validate_model_json
@@ -136,6 +136,24 @@ class MigrateLockScheduleTests(unittest.TestCase):
         con.close()
         with self.assertRaises(FileExistsError):
             backup_sqlite(src, dest)
+
+    def test_migrate_models_dir_keeps_source(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        src = root / "legacy"
+        dest = root / "xiaomao-ollama"
+        (src / "manifests" / "library" / "gemma4").mkdir(parents=True)
+        (src / "blobs").mkdir()
+        (src / "manifests" / "library" / "gemma4" / "12b").write_text("manifest", encoding="utf-8")
+        (src / "blobs" / "sha256-abc").write_bytes(b"blob-bytes")
+        report = migrate_models_dir(src, dest)
+        self.assertTrue(report["src_retained"])
+        self.assertEqual((src / "blobs" / "sha256-abc").read_bytes(), b"blob-bytes")
+        self.assertEqual((dest / "blobs" / "sha256-abc").read_bytes(), b"blob-bytes")
+        self.assertEqual(report["after"]["blob_count"], 1)
+        self.assertEqual(report["after"]["manifest_count"], 1)
+        (dest / "extra").write_text("nope", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            migrate_models_dir(src, dest)
 
     def test_scan_lock_exclusive(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

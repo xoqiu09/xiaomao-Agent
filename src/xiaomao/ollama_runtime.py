@@ -56,12 +56,13 @@ def ollama_bin() -> str | None:
     found = which("ollama")
     if found:
         return found
-    bundled = Path("/Applications/Ollama.app/Contents/Resources/ollama")
-    if bundled.exists():
-        return str(bundled)
-    local = Path("/usr/local/bin/ollama")
-    if local.exists():
-        return str(local)
+    for candidate in (
+        Path("/Volumes/LocalDevData/Xiaomao/bin/ollama"),
+        Path("/Applications/Ollama.app/Contents/Resources/ollama"),
+        Path("/usr/local/bin/ollama"),
+    ):
+        if candidate.exists():
+            return str(candidate)
     return None
 
 

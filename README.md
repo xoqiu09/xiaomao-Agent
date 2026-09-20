@@ -45,4 +45,6 @@ PYTHONPATH=src python3.11 -m xiaomao schedule uninstall
 - 新工作树只列为候选，不自动授权
 - 3–7 天稳定性本轮标记为待观察
 
-深度模型候选（需本机评测后选定）：`qwen3.6:35b`、`qwen3-coder:30b`。轻量基线 `gemma4:12b` 保留。
+深度模型候选（需本机评测后选定）：`qwen3.6:35b`、`qwen3-coder:30b`。轻量基线 `gemma4:12b` 保留，目录 `/Volumes/LocalDevData/Xiaomao/ollama`。
+
+官方 CLI 只装一种：外盘 `ollama-darwin.tgz`（`scripts/user_install_ollama.sh`），不 sudo、不写 `/Applications`。
