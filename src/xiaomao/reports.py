@@ -186,7 +186,10 @@ def facts_payload(cfg: AppConfig, conn, project_id: str) -> dict[str, Any]:
     for row in rows:
         facts = json.loads(row["facts_json"] or "{}") if row["observation_id"] else {}
         obs_id = row["observation_id"]
+        wt_eid = f"worktree:{row['worktree_id']}"
+        evidence_ids.append(wt_eid)
         if obs_id:
+            evidence_ids.append(f"observation:{obs_id}")
             for ev in conn.execute(
                 "SELECT evidence_id FROM evidence WHERE observation_id = ?",
                 (obs_id,),
@@ -195,6 +198,7 @@ def facts_payload(cfg: AppConfig, conn, project_id: str) -> dict[str, Any]:
         worktrees.append(
             {
                 "worktree_id": row["worktree_id"],
+                "evidence_id": wt_eid,
                 "path": row["canonical_path"],
                 "scan_enabled": bool(row["scan_enabled"]),
                 "observation_id": obs_id,

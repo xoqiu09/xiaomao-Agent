@@ -62,7 +62,7 @@ class AppConfig:
     max_loaded_models: int = 1
     lite_model: str = "gemma4:12b"
     depth_candidates: list[str] = field(
-        default_factory=lambda: ["qwen3.6:35b", "qwen3-coder:30b"]
+        default_factory=lambda: ["qwen3-coder:30b", "qwen3.6:35b"]
     )
 
     def project(self, project_id: str) -> ProjectSpec:
@@ -192,7 +192,7 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
         context_length=int(data.get("context_length") or 8192),
         max_loaded_models=int(data.get("max_loaded_models") or 1),
         lite_model=data.get("lite_model") or "gemma4:12b",
-        depth_candidates=list(data.get("depth_candidates") or ["qwen3.6:35b", "qwen3-coder:30b"]),
+        depth_candidates=list(data.get("depth_candidates") or ["qwen3-coder:30b", "qwen3.6:35b"]),
     )
 
 

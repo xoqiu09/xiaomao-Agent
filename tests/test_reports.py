@@ -58,6 +58,37 @@ class ReportCliTests(unittest.TestCase):
         self.assertIn("unknown", text)
         self.assertIn("约束", text)
 
+    def test_facts_payload_includes_worktree_evidence_ids(self) -> None:
+        from xiaomao.config import load_config
+        from xiaomao.reports import facts_payload
+        from xiaomao.store import open_db
+
+        home = self._home()
+        cfg = load_config(home)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            payload = facts_payload(cfg, conn, "website")
+        ids = payload["evidence_ids"]
+        self.assertIn("worktree:website-main", ids)
+        self.assertTrue(any(i.startswith("worktree:") for i in ids))
+        self.assertEqual(payload["test_status"], "unknown")
+        self.assertEqual(payload["deploy_status"], "unknown")
+        self.assertTrue(any(wt.get("evidence_id") == "worktree:website-main" for wt in payload["worktrees"]))
+
+    def test_question_about_shipped_still_rejected(self) -> None:
+        facts = {"evidence_ids": ["ev_1"], "test_status": "unknown", "deploy_status": "unknown"}
+        payload = {
+            "interpretations": [{"text": "工作区 clean", "evidence_ids": ["ev_1"]}],
+            "suggestions": [{"text": "确认是否已上线", "evidence_ids": ["ev_1"]}],
+            "unknowns": [],
+        }
+        errors = validate_model_json(payload, facts)
+        self.assertTrue(any(e.startswith("unwarranted_completion") for e in errors))
+
+    def test_default_depth_candidate_is_coder_30b(self) -> None:
+        cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        self.assertEqual(cfg.depth_candidates[0], "qwen3-coder:30b")
+        self.assertIn("qwen3.6:35b", cfg.depth_candidates)
+
     def test_eval_dry_run_degrades(self) -> None:
         home = self._home()
         buf = io.StringIO()
