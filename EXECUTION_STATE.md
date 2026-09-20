@@ -1,7 +1,7 @@
 # EXECUTION_STATE.md
 
-更新时间：2026-09-20 14:16 CST
-状态：**IN_PROGRESS（Phase 2：35b 结构失败已修提取；30b 仍在唯一 pull）**
+更新时间：2026-09-20 14:22 CST
+状态：**IN_PROGRESS（Phase 2：30b 唯一 pull；JSON 提取已合入）**
 
 本文件是唯一交接状态记录。不要另开平行交接文档。
 
@@ -20,14 +20,14 @@
 - `qwen3.6:35b` 已落地（blob d372de8e9348）；评测 `/Volumes/LocalDevData/Xiaomao/cache/eval-qwen3.6_35b.json`：**n=22 ok=0 degraded=22 usable=0 serious_factual_errors=0 elapsed_s=1427.99**，22 条 `invalid_json`。不伪造 pass。
 - host_pressure：swap 0→5.75M / 1024M；pages_compressor 902683→1590391
 - 日志：每条 `eval time … / 1024 tokens`（thinking 吃光 `num_predict`，content 空/残缺）
-- 提取修复：`think: false`（chat 顶层）、`num_predict=2048`、`temperature=0`；`extract_json_object` 从 content/thinking 抽对象。**校验器未放宽**。
-- unittest **36/36 PASS**
-- Git HEAD 将含此次提取修复
+- 提取修复已合入：`think: false`（chat 顶层，见 `chat_json_payload`）、`num_predict=2048`、`temperature=0`；`extract_json_object` 从 content/thinking 抽对象。评测行记 `parse_source` / `eval_count`。**校验器未放宽**。
+- unittest **36/36 PASS**（含 extract + think:false payload 钉死）
+- Git HEAD `da09507`（`bb2d78b` 提取 / `547e573` 诊断字段 / `da09507` payload 钉死）
 
 ### 未完成
 
-- 唯一 `qwen3-coder:30b` pull（blob `1194192cf2a1`，19×1GB；逻辑约 17.3G / alloc ~8.5G，EOF/stalled 已自重试）。勿另开第二条。
-- 30b 评测 JSON；用新提取重测 35b
+- 唯一 `qwen3-coder:30b` pull（blob `1194192cf2a1`；逻辑 17.282G，alloc 约 14.7G 仍在涨）。勿另开第二条。
+- 30b 评测 JSON（期望 `eval-qwen3-coder_30b.json`）；用新提取重测 35b
 - 按本项目任务质量选胜者；两者仍失败则再修输入组织/提示后重测，不降安全/事实标准
 - `--with-model` 日报/Handoff
 - 模型路径后 `PYTHONPATH=src python3.11 scripts/accept.py`
