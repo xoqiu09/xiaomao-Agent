@@ -136,6 +136,9 @@ def run_eval(
         scored = score_sample(sample, result)
         scored["latency_s"] = round(time.monotonic() - t0, 3)
         scored["model_note_head"] = (result.get("model_note") or "")[:240]
+        raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+        scored["parse_source"] = raw.get("parse_source")
+        scored["eval_count"] = raw.get("eval_count")
         rows.append(scored)
     elapsed = time.monotonic() - started
     serious = [r for r in rows if r["serious_factual_error"]]
