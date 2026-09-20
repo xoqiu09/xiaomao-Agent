@@ -3,14 +3,17 @@
 # 不 sudo、不写 /Applications、不写 /usr/local、不改 launchd 系统服务。
 # 二进制落到已授权外盘；模型目录必须是 /Volumes/LocalDevData/Xiaomao/ollama。
 # 沙盒拦 github.com/ollama.com，必须在用户终端跑。
+# 支持续传：半成品保存在 .partial，校验通过才改名为正式 tgz。
 set -e
 VER=v0.34.2
 URL="https://github.com/ollama/ollama/releases/download/${VER}/ollama-darwin.tgz"
 EXPECT_SHA="f33b2a5aa59bc6c961ed3ec23ba9dc646ca6d99ced8d2a0d46eb3a522167dd3f"
+EXPECT_BYTES=158526160
 CACHE="/Volumes/LocalDevData/Xiaomao/cache"
 OPT="/Volumes/LocalDevData/Xiaomao/opt/ollama-${VER}"
 BINDIR="/Volumes/LocalDevData/Xiaomao/bin"
 TGZ="${CACHE}/ollama-darwin-${VER}.tgz"
+PARTIAL="${TGZ}.partial"
 
 if [ ! -d /Volumes/LocalDevData ]; then
   echo "ERROR: external volume not mounted"
@@ -25,12 +28,58 @@ if [ -x "${BINDIR}/ollama" ]; then
   exit 0
 fi
 
-if [ ! -f "$TGZ" ]; then
-  echo "downloading $URL"
-  curl -fL --retry 3 --retry-delay 2 -o "$TGZ" "$URL"
+sha_of() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+if [ -f "$TGZ" ]; then
+  GOT=$(sha_of "$TGZ")
+  if [ "$GOT" = "$EXPECT_SHA" ]; then
+    echo "sha256_ok $GOT (cached tgz)"
+  else
+    echo "cached tgz incomplete/mismatch; keeping as partial ($(wc -c < "$TGZ") bytes)"
+    mv -f "$TGZ" "$PARTIAL"
+  fi
 fi
 
-GOT=$(shasum -a 256 "$TGZ" | awk '{print $1}')
+if [ ! -f "$TGZ" ]; then
+  attempt=1
+  while [ "$attempt" -le 8 ]; do
+    echo "download attempt $attempt → $PARTIAL"
+    # -C - resumes; do not use -f here: a 416 on a complete partial is recoverable.
+    set +e
+    curl -L --retry 5 --retry-delay 3 --retry-all-errors \
+      -C - -o "$PARTIAL" "$URL"
+    curl_rc=$?
+    set -e
+    have=0
+    if [ -f "$PARTIAL" ]; then
+      have=$(wc -c < "$PARTIAL" | tr -d ' ')
+    fi
+    echo "curl_rc=$curl_rc bytes=$have expected=$EXPECT_BYTES"
+    if [ -f "$PARTIAL" ]; then
+      GOT=$(sha_of "$PARTIAL")
+      if [ "$GOT" = "$EXPECT_SHA" ]; then
+        mv -f "$PARTIAL" "$TGZ"
+        echo "sha256_ok $GOT"
+        break
+      fi
+    fi
+    if [ "$have" -ge "$EXPECT_BYTES" ] && [ "$GOT" != "$EXPECT_SHA" ]; then
+      echo "ERROR: size reached but sha256 mismatch; deleting corrupt partial"
+      rm -f "$PARTIAL"
+    fi
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+fi
+
+if [ ! -f "$TGZ" ]; then
+  echo "ERROR: download did not produce a verified tarball"
+  exit 2
+fi
+
+GOT=$(sha_of "$TGZ")
 if [ "$GOT" != "$EXPECT_SHA" ]; then
   echo "ERROR: sha256 mismatch got=$GOT expected=$EXPECT_SHA"
   rm -f "$TGZ"
@@ -41,7 +90,6 @@ echo "sha256_ok $GOT"
 rm -rf "$OPT"
 mkdir -p "$OPT"
 tar -xzf "$TGZ" -C "$OPT"
-# Official tarball layout: ollama binary at top level, or ./bin/ollama.
 if [ -x "$OPT/ollama" ]; then
   ln -sfn "$OPT/ollama" "$BINDIR/ollama"
 elif [ -x "$OPT/bin/ollama" ]; then

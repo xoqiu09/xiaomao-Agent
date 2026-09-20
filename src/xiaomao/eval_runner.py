@@ -3,12 +3,72 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from typing import Any
 
 from xiaomao.config import AppConfig
 from xiaomao.eval_samples import Sample, samples
 from xiaomao.summarize import _is_assertive_completion, summarize_or_degrade, validate_model_json
+
+
+def host_pressure() -> dict[str, Any]:
+    """Memory / swap snapshot. Best-effort; unknown fields stay null."""
+    out: dict[str, Any] = {
+        "memory_bytes": None,
+        "swap_used": None,
+        "swap_total": None,
+        "pages_free": None,
+        "pages_speculative": None,
+        "pages_compressor": None,
+    }
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip().isdigit():
+            out["memory_bytes"] = int(proc.stdout.strip())
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", "vm.swapusage"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0:
+            out["swap_raw"] = proc.stdout.strip()
+            text = proc.stdout
+            # "total = 2048.00M  used = 412.50M  free = 1635.50M"
+            for key, dest in (("total =", "swap_total"), ("used =", "swap_used")):
+                if key in text:
+                    token = text.split(key, 1)[1].split()[0]
+                    out[dest] = token
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5, check=False)
+        if proc.returncode == 0:
+            mapping = {
+                "Pages free": "pages_free",
+                "Pages speculative": "pages_speculative",
+                "Pages stored in compressor": "pages_compressor",
+            }
+            for line in proc.stdout.splitlines():
+                for label, dest in mapping.items():
+                    if line.startswith(label):
+                        digits = "".join(ch for ch in line.split(":", 1)[-1] if ch.isdigit())
+                        if digits:
+                            out[dest] = int(digits)
+    except OSError:
+        pass
+    return out
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> list[str]:
@@ -63,6 +123,7 @@ def run_eval(
 ) -> dict[str, Any]:
     rows = []
     started = time.monotonic()
+    pressure_before = host_pressure()
     for sample in selected or samples():
         t0 = time.monotonic()
         result = summarize_or_degrade(
@@ -79,6 +140,7 @@ def run_eval(
     elapsed = time.monotonic() - started
     serious = [r for r in rows if r["serious_factual_error"]]
     usable = [r for r in rows if r["ok"] and not r["serious_factual_error"]]
+    pressure_after = host_pressure()
     return {
         "model": model,
         "n": len(rows),
@@ -87,6 +149,8 @@ def run_eval(
         "usable": len(usable),
         "serious_factual_errors": len(serious),
         "elapsed_s": round(elapsed, 3),
+        "host_pressure_before": pressure_before,
+        "host_pressure_after": pressure_after,
         "samples": rows,
     }
 

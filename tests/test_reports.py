@@ -10,7 +10,7 @@ from pathlib import Path
 
 from xiaomao.cli import main
 from xiaomao.config import default_config, save_config
-from xiaomao.eval_runner import self_check_validators
+from xiaomao.eval_runner import host_pressure, self_check_validators
 from xiaomao.eval_samples import samples
 from xiaomao.lock import ScanLock
 from xiaomao.migrate import backup_sqlite, migrate_models_dir
@@ -101,6 +101,11 @@ class SummarizeTests(unittest.TestCase):
         self.assertTrue(result["degraded"])
         self.assertIn("规则程序", result["model_note"])
         self.assertTrue(degrade_note("x"))
+
+    def test_host_pressure_keys(self) -> None:
+        snap = host_pressure()
+        self.assertIn("memory_bytes", snap)
+        self.assertIn("swap_used", snap)
 
     def test_sample_count(self) -> None:
         self.assertGreaterEqual(len(samples()), 20)
