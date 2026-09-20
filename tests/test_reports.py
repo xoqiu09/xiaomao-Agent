@@ -122,6 +122,24 @@ class SummarizeTests(unittest.TestCase):
         ):
             self.assertIn(needed, cats)
 
+    def test_extract_json_object_from_think_and_fences(self) -> None:
+        from xiaomao.ollama_runtime import extract_json_object
+
+        obj = {
+            "interpretations": [{"text": "clean", "evidence_ids": ["ev_1"]}],
+            "suggestions": [],
+            "unknowns": [{"text": "测试 unknown"}],
+        }
+        blob = json.dumps(obj, ensure_ascii=False)
+        self.assertEqual(extract_json_object(blob), obj)
+        self.assertEqual(extract_json_object(f"```json\n{blob}\n```"), obj)
+        wrapped = f"<think>先核对证据，不要发明测试通过。</think>\n{blob}"
+        self.assertEqual(extract_json_object(wrapped), obj)
+        self.assertIsNone(extract_json_object(""))
+        self.assertIsNone(extract_json_object("not json at all"))
+        # Extraction must not invent a payload; leftover prose stays invalid.
+        self.assertIsNone(extract_json_object("测试通过，已上线"))
+
 
 class MigrateLockScheduleTests(unittest.TestCase):
     def test_backup_sqlite_is_consistent(self) -> None:

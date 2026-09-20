@@ -183,6 +183,57 @@ def dir_in_use(path: Path) -> list[str]:
     return lines[1:] if lines else []
 
 
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object from model text. Does not relax schema or facts.
+
+    Qwen thinking models may put the object after <think>…</think>, inside
+    fences, or (when think is on) in message.thinking while content is empty.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    lower = stripped.lower()
+    if lower.startswith("```json"):
+        stripped = stripped[7:]
+    elif lower.startswith("```"):
+        stripped = stripped[3:]
+    if stripped.endswith("```"):
+        stripped = stripped[:-3]
+    stripped = stripped.strip()
+    # Drop a single leading/trailing think block; keep the remainder.
+    if "<think>" in stripped.lower() or "</think>" in stripped.lower():
+        lowered = stripped.lower()
+        start = lowered.find("<think>")
+        end = lowered.find("</think>")
+        if start != -1 and end != -1 and end > start:
+            stripped = (stripped[:start] + stripped[end + len("</think>") :]).strip()
+        elif start != -1:
+            stripped = stripped[:start].strip()
+    try:
+        loaded = json.loads(stripped)
+        if isinstance(loaded, dict):
+            return loaded
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    search = stripped
+    idx = 0
+    while True:
+        brace = search.find("{", idx)
+        if brace < 0:
+            return None
+        try:
+            loaded, _end = decoder.raw_decode(search[brace:])
+        except json.JSONDecodeError:
+            idx = brace + 1
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+        idx = brace + 1
+
+
 class OllamaClient:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -201,10 +252,12 @@ class OllamaClient:
             "model": model,
             "stream": False,
             "keep_alive": 0,
+            "think": False,
             "format": schema,
             "options": {
                 "num_ctx": int(self.cfg.context_length),
-                "num_predict": 1024,
+                "num_predict": 2048,
+                "temperature": 0,
             },
             "messages": [
                 {"role": "system", "content": system},
@@ -213,19 +266,24 @@ class OllamaClient:
         }
         raw = api_post(self.cfg, "/api/chat", payload, timeout=timeout)
         content = ""
+        thinking = ""
         msg = raw.get("message") or {}
         if isinstance(msg, dict):
             content = msg.get("content") or ""
-        parsed: dict[str, Any] | None
-        try:
-            parsed = json.loads(content) if content else None
-        except json.JSONDecodeError:
-            parsed = None
+            thinking = msg.get("thinking") or ""
+        parsed = extract_json_object(content)
+        parse_source = "content" if parsed is not None else None
+        if parsed is None:
+            parsed = extract_json_object(thinking)
+            if parsed is not None:
+                parse_source = "thinking"
         return {
             "model": raw.get("model") or model,
             "digest": None,
             "json": parsed,
             "content": content,
+            "thinking": thinking,
+            "parse_source": parse_source,
             "raw_keys": sorted(raw.keys()),
             "eval_duration": raw.get("eval_duration"),
             "load_duration": raw.get("load_duration"),

@@ -1,13 +1,13 @@
 # EXECUTION_STATE.md
 
-更新时间：2026-09-20 12:56 CST
-状态：**IN_PROGRESS（Phase 2：评测拉取中）**
+更新时间：2026-09-20 14:16 CST
+状态：**IN_PROGRESS（Phase 2：35b 结构失败已修提取；30b 仍在唯一 pull）**
 
 本文件是唯一交接状态记录。不要另开平行交接文档。
 
 ## 当前
 
-[xiaomao-agent-1](#local_3a5d5eaf-8aa8-482a-b0cf-1f6c46651617) 用户终端：INSTALL_OK → SERVE_OK pid=17807 → SMOKE_OK。正在跑 `user_eval_models.sh`（先 `qwen3.6:35b` 再 `qwen3-coder:30b`）。GOAL 不另开 curl / serve / pull / eval。
+[xiaomao-agent-1](#local_3a5d5eaf-8aa8-482a-b0cf-1f6c46651617) 用户终端：INSTALL_OK → SERVE_OK pid=17807 → SMOKE_OK。`user_eval_models.sh` 已完成 `qwen3.6:35b` 评测，正在唯一一条 `qwen3-coder:30b` pull。GOAL 不另开 curl / serve / pull / eval。
 
 ### 已核实证据
 
@@ -16,13 +16,19 @@
 - serve pid **17807** 进程 env：HOST=127.0.0.1:11434 MODELS=/Volumes/LocalDevData/Xiaomao/ollama NO_CLOUD=1 MAX_LOADED=1 NUM_PARALLEL=1 KEEP_ALIVE=0 CONTEXT=8192
 - 监听仅 127.0.0.1:11434
 - 外盘 UUID **match** `44c5480a-388c-475e-a320-a49b226a5953`
-- SMOKE_OK：gemma4:12b 生成「我没有 shell。」；llama-server `-c 8192`；unload 后 `ollama ps` 空；源目录未删
-- Git HEAD `e95c8dd`（install lock / doctor 外盘 CLI / smoke 钉 8192）
-- unittest 35/35 PASS
+- SMOKE_OK：gemma4:12b；llama-server `-c 8192`；源目录未删
+- `qwen3.6:35b` 已落地（blob d372de8e9348）；评测 `/Volumes/LocalDevData/Xiaomao/cache/eval-qwen3.6_35b.json`：**n=22 ok=0 degraded=22 usable=0 serious_factual_errors=0 elapsed_s=1427.99**，22 条 `invalid_json`。不伪造 pass。
+- host_pressure：swap 0→5.75M / 1024M；pages_compressor 902683→1590391
+- 日志：每条 `eval time … / 1024 tokens`（thinking 吃光 `num_predict`，content 空/残缺）
+- 提取修复：`think: false`（chat 顶层）、`num_predict=2048`、`temperature=0`；`extract_json_object` 从 content/thinking 抽对象。**校验器未放宽**。
+- unittest **36/36 PASS**
+- Git HEAD 将含此次提取修复
 
 ### 未完成
 
-- 评测 JSON：`/Volumes/LocalDevData/Xiaomao/cache/eval-qwen3.6__35b.json` 与 `eval-qwen3-coder__30b.json`
+- 唯一 `qwen3-coder:30b` pull（blob `1194192cf2a1`，19×1GB；逻辑约 17.3G / alloc ~8.5G，EOF/stalled 已自重试）。勿另开第二条。
+- 30b 评测 JSON；用新提取重测 35b
+- 按本项目任务质量选胜者；两者仍失败则再修输入组织/提示后重测，不降安全/事实标准
 - `--with-model` 日报/Handoff
 - 模型路径后 `PYTHONPATH=src python3.11 scripts/accept.py`
 - 3–7 天稳定性：待观察
