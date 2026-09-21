@@ -12,7 +12,7 @@ Xiaomao 是部署在 Mac Studio 上、长期运行的本地私有工程观察 Ag
 ## 运行时
 
 - 程序版本：`xiaomao 0.1.0`
-- 本仓 HEAD：见本轮 hygiene commit（提交后回填）
+- 本仓 HEAD：`89fedd3dcb5a16c7ccf2764904dacdf81877d168`（2026-09-21 hygiene）
 - 实现基线：`06e8b7e`（单工作树试运行）
 - 形式运行时：`~/Library/Application Support/Xiaomao/`
 - schema：2（`scan_runs` / `events`）
