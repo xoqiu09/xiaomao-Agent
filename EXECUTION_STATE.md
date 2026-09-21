@@ -11,7 +11,7 @@
 
 ### 本轮提交与运行时
 
-- 本仓提交：本轮 Goal 2 commit（提交后回填 SHA）
+- 本仓提交：`06e8b7e2b937a54b360aed1f1ca4b5af23e4169a`
 - 核对起点：`d1133bece1245b4246b37ac7ef58580919efc284`
 - 程序版本：`xiaomao 0.1.0`
 - 形式运行时：`~/Library/Application Support/Xiaomao/`
