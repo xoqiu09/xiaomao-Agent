@@ -18,11 +18,9 @@ from xiaomao.store import (
     infer_paused,
     insert_event,
     insert_summary,
-    job_get,
     latest_summary_for_range,
     scan_paused,
     set_meta,
-    upsert_job,
     utc_now,
 )
 
@@ -236,20 +234,6 @@ def reuse_summary_note(row) -> str:
         digest=row["model_digest"],
         validation=row["validation_status"] or "pass",
     ) + "\n（同一证据快照已有通过的解读，未再次加载模型。）"
-
-
-def daily_job_key(date: str, project_id: str, snapshot: str) -> str:
-    return f"daily:{date}:{project_id}:{snapshot}"
-
-
-def claim_daily_job(conn, key: str) -> tuple[str, bool]:
-    """Return (job_id, is_new). Duplicate same-day snapshot is not a new inference."""
-    existing = job_get(conn, key)
-    if existing is not None and existing["state"] in {"done", "running"}:
-        return existing["job_id"], False
-    jid = existing["job_id"] if existing else f"job_{uuid.uuid4().hex[:16]}"
-    upsert_job(conn, job_id=jid, deduplication_key=key, state="running")
-    return jid, True
 
 
 def latest_report(home: Path, kind: str, project_id: str = "website") -> Path | None:

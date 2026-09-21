@@ -8,7 +8,7 @@ LOGDIR="/Users/xiuqiu/Library/Application Support/Xiaomao/logs"
 PIDFILE="/Users/xiuqiu/Library/Application Support/Xiaomao/ollama.pid"
 
 if [ ! -x "$BIN" ]; then
-  echo "ERROR: missing $BIN — run scripts/user_install_ollama.sh first"
+  echo "ERROR: missing $BIN"
   exit 2
 fi
 if [ ! -d /Volumes/LocalDevData ]; then
