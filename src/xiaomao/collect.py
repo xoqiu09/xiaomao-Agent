@@ -7,13 +7,18 @@ from pathlib import Path
 
 from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec
 from xiaomao.git_readonly import GitSnapshot, collect_snapshot, snapshot_fingerprint
+from xiaomao.ops import GAP_WARN_AFTER_S, gap_seconds_since
 from xiaomao.policy import path_is_denied
 from xiaomao.store import (
     evidence_for_observation,
+    insert_event,
     insert_evidence,
     insert_observation,
+    insert_scan_run,
+    last_scan_success,
     latest_observation,
     record_discovered_worktree,
+    scan_paused,
     utc_now,
     upsert_project,
     upsert_worktree,
@@ -265,14 +270,90 @@ def _insert_status_evidence(conn, observation_id: str, observed_at: str, snap: G
         add("untracked", e.path, "??")
 
 
+def _record_scan_run(
+    conn,
+    *,
+    project_id: str,
+    started_at: str,
+    outcome: str,
+    results: list[dict],
+    last_safe_error: str | None = None,
+) -> None:
+    finished = utc_now()
+    prev = last_scan_success(conn, project_id)
+    gap = gap_seconds_since(prev["finished_at"] if prev else None, started_at)
+    last_obs = None
+    for row in reversed(results):
+        if row.get("observation_id"):
+            last_obs = row["observation_id"]
+            break
+    insert_scan_run(
+        conn,
+        {
+            "run_id": _new_id("run"),
+            "project_id": project_id,
+            "started_at": started_at,
+            "finished_at": finished,
+            "outcome": outcome,
+            "last_safe_error": last_safe_error,
+            "inserted": sum(1 for r in results if r.get("inserted")),
+            "unchanged": sum(1 for r in results if r.get("status") == "unchanged"),
+            "gap_since_last_success_s": gap,
+            "last_observation_id": last_obs,
+        },
+    )
+    insert_event(
+        conn,
+        kind=f"scan_{outcome}",
+        project_id=project_id,
+        payload={
+            "inserted": sum(1 for r in results if r.get("inserted")),
+            "unchanged": sum(1 for r in results if r.get("status") == "unchanged"),
+            "gap_since_last_success_s": gap,
+            "last_safe_error": last_safe_error,
+        },
+    )
+    if gap is not None and gap > GAP_WARN_AFTER_S:
+        insert_event(
+            conn,
+            kind="collection_gap",
+            project_id=project_id,
+            payload={
+                "gap_s": gap,
+                "note": "距上次成功扫描偏长，可能含睡眠/关机/登出或其他未采集窗口。缺口内未保存到磁盘的编辑不可见，不编造。",
+            },
+        )
+
+
 def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
+    started = utc_now()
     project = cfg.project(project_id)
     register_project(conn, cfg, project)
-    results = []
+    if scan_paused(conn):
+        _record_scan_run(
+            conn,
+            project_id=project_id,
+            started_at=started,
+            outcome="skip",
+            results=[],
+            last_safe_error="scan_paused",
+        )
+        return [{"project": project_id, "status": "paused", "inserted": False}]
+    results: list[dict] = []
     for wt in project.worktrees:
         if not wt.scan:
             continue
         results.append(scan_worktree(conn, cfg, project, wt))
+    errors = [r.get("error") for r in results if r.get("status") == "error"]
+    outcome = "error" if errors and not any(r.get("status") != "error" for r in results) else "success"
+    _record_scan_run(
+        conn,
+        project_id=project_id,
+        started_at=started,
+        outcome=outcome,
+        results=results,
+        last_safe_error="; ".join(str(e) for e in errors if e)[:400] or None,
+    )
     return results
 
 

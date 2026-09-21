@@ -51,7 +51,11 @@ class ReportCliTests(unittest.TestCase):
         daily = (home / "reports" / "daily" / "2026-09-20.txt").read_text(encoding="utf-8")
         self.assertIn("本报告由规则程序生成", daily)
         self.assertIn("测试：unknown", daily)
+        self.assertIn("授权观察范围内无新变化", daily)
+        self.assertNotIn("用户今天没有工作", daily)
         self.assertNotIn("测试通过", daily)
+        self.assertIn("已核实", daily)
+        self.assertIn("未核实", daily)
         handoffs = list((home / "reports" / "handoff").glob("website-*.txt"))
         self.assertTrue(handoffs)
         text = handoffs[0].read_text(encoding="utf-8")
@@ -205,7 +209,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         report = backup_sqlite(src, dest)
         self.assertEqual(report["integrity"], "ok")
         con = sqlite3.connect(dest)
-        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "1")
+        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "2")
         self.assertEqual(con.execute("SELECT value FROM meta WHERE key='probe'").fetchone()[0], "1")
         con.close()
         with self.assertRaises(FileExistsError):
@@ -255,6 +259,142 @@ class MigrateLockScheduleTests(unittest.TestCase):
         exec_line = [ln for ln in text.splitlines() if ln.startswith("exec ")][-1]
         self.assertIn("scan --project", exec_line)
         self.assertNotIn("eval", exec_line)
+
+    def test_daily_plist_is_2130_and_separate_from_scan(self) -> None:
+        from xiaomao.schedule import DAILY_LABEL, daily_plist_payload
+
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        payload = daily_plist_payload(home=home, log_dir=home / "logs")
+        self.assertEqual(payload["Label"], DAILY_LABEL)
+        self.assertEqual(payload["StartCalendarInterval"], {"Hour": 21, "Minute": 30})
+        self.assertNotIn("StartInterval", payload)
+        joined = " ".join(payload["ProgramArguments"])
+        self.assertIn("xiaomao-daily.sh", joined)
+        self.assertNotIn("xiaomao-scan.sh", joined)
+        script = Path(__file__).resolve().parents[1] / "scripts" / "xiaomao-daily.sh"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("daily --scheduled", text)
+        self.assertNotIn("with-model", text)
+
+    def test_scan_runs_recorded_and_pause_skips(self) -> None:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory())) / "h"
+        root = home.parent
+        repo = init_repo(root / "repo")
+        cfg = default_config(home)
+        cfg.home = str(home)
+        cfg.projects[0].approved_root = str(repo)
+        cfg.projects[0].worktrees[0].path = str(repo)
+        for extra in cfg.projects[0].worktrees[1:]:
+            extra.path = str(root / extra.worktree_id)
+            extra.scan = False
+        home.mkdir()
+        save_config(cfg)
+        self.assertEqual(main(["--home", str(home), "init"]), 0)
+        self.assertEqual(main(["--home", str(home), "scan", "--project", "website"]), 0)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            n = conn.execute("SELECT COUNT(*) AS n FROM scan_runs WHERE outcome='success'").fetchone()["n"]
+            self.assertGreaterEqual(n, 1)
+        self.assertEqual(main(["--home", str(home), "pause", "scan"]), 0)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["--home", str(home), "scan", "--project", "website"]), 0)
+        self.assertIn("paused", buf.getvalue())
+        with open_db(home / "xiaomao.sqlite") as conn:
+            skipped = conn.execute("SELECT COUNT(*) AS n FROM scan_runs WHERE outcome='skip'").fetchone()["n"]
+            self.assertGreaterEqual(skipped, 1)
+        self.assertEqual(main(["--home", str(home), "resume", "scan"]), 0)
+
+    def test_should_call_depth_model_table(self) -> None:
+        from xiaomao.ops import pause_infer, should_call_depth_model
+
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with open_db(home / "db.sqlite") as conn:
+            facts = {
+                "project_id": "website",
+                "worktrees": [
+                    {
+                        "worktree_id": "website-main",
+                        "observation_id": "obs_1",
+                        "head_oid": "abc",
+                        "staged_count": 0,
+                        "unstaged_count": 0,
+                        "untracked_count": 0,
+                        "scan_enabled": True,
+                    }
+                ],
+            }
+            call, reason = should_call_depth_model(conn, facts, with_model=False, scheduled=False)
+            self.assertFalse(call)
+            self.assertEqual(reason, "rules_only")
+            call, reason = should_call_depth_model(conn, facts, with_model=False, scheduled=True)
+            self.assertFalse(call)
+            self.assertEqual(reason, "no_new_evidence")
+            call, reason = should_call_depth_model(conn, facts, with_model=True, scheduled=False)
+            self.assertTrue(call)
+            pause_infer(conn)
+            call, reason = should_call_depth_model(conn, facts, with_model=True, scheduled=False)
+            self.assertFalse(call)
+            self.assertEqual(reason, "infer_paused")
+
+    def test_retry_once_then_degrade(self) -> None:
+        from xiaomao.config import default_config
+        from xiaomao.summarize import summarize_or_degrade
+
+        class Boom:
+            def __init__(self) -> None:
+                self.n = 0
+                self.stopped = []
+
+            def generate_json(self, **kwargs):
+                self.n += 1
+                raise RuntimeError("busy")
+
+            def stop(self, model: str) -> None:
+                self.stopped.append(model)
+
+        cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        client = Boom()
+        result = summarize_or_degrade(cfg, {"evidence_ids": []}, client=client)
+        self.assertTrue(result["degraded"])
+        self.assertEqual(client.n, 2)
+        self.assertEqual(result["retry_count"], 1)
+        self.assertTrue(client.stopped)
+
+    def test_scan_does_not_touch_workspace_config_or_hooks(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        repo = init_repo(root / "repo")
+        (repo / "tracked.txt").write_text("keep\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "track")
+        (repo / "workspace-only.txt").write_text("scratch\n", encoding="utf-8")
+        gitdir = repo / ".git"
+        hooks = gitdir / "hooks"
+        hooks.mkdir(exist_ok=True)
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        hook_mtime = hook.stat().st_mtime_ns
+        config = gitdir / "config"
+        config_mtime = config.stat().st_mtime_ns
+        index = gitdir / "index"
+        index_mtime = index.stat().st_mtime_ns
+        home = root / "home"
+        cfg = default_config(home)
+        cfg.home = str(home)
+        cfg.projects[0].approved_root = str(repo)
+        cfg.projects[0].worktrees[0].path = str(repo)
+        for extra in cfg.projects[0].worktrees[1:]:
+            extra.path = str(root / extra.worktree_id)
+            extra.scan = False
+        home.mkdir()
+        save_config(cfg)
+        self.assertEqual(main(["--home", str(home), "init"]), 0)
+        self.assertEqual(main(["--home", str(home), "scan", "--project", "website"]), 0)
+        self.assertEqual(index.stat().st_mtime_ns, index_mtime)
+        self.assertEqual(config.stat().st_mtime_ns, config_mtime)
+        self.assertEqual(hook.stat().st_mtime_ns, hook_mtime)
+        self.assertEqual((repo / "workspace-only.txt").read_text(encoding="utf-8"), "scratch\n")
+        status = git(repo, "status", "--porcelain").stdout
+        self.assertIn("?? workspace-only.txt", status)
 
 
 class GitReadonlyBusinessContractTests(unittest.TestCase):

@@ -120,6 +120,16 @@ def default_report_path(cfg: AppConfig, project_id: str) -> Path:
 
 
 def status_text(conn, cfg: AppConfig, project_id: str) -> str:
+    from xiaomao.store import infer_paused, last_scan_success, scan_paused
+
     project = cfg.project(project_id)
     rows = latest_by_project(conn, project_id)
-    return render_project_status(cfg, project, rows)
+    last = last_scan_success(conn, project_id)
+    last_s = last["finished_at"] if last and last["finished_at"] else "尚无 scan_runs 成功记录"
+    header = [
+        f"最近一次扫描成功：{last_s}",
+        f"推理暂停：{'是' if infer_paused(conn) else '否'}",
+        f"扫描暂停：{'是' if scan_paused(conn) else '否'}",
+        "",
+    ]
+    return "\n".join(header) + render_project_status(cfg, project, rows)

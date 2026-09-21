@@ -130,7 +130,30 @@ CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
   safe_excerpt,
   evidence_kind
 );
+
+CREATE TABLE IF NOT EXISTS scan_runs (
+  run_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  outcome TEXT NOT NULL,
+  last_safe_error TEXT,
+  inserted INTEGER NOT NULL DEFAULT 0,
+  unchanged INTEGER NOT NULL DEFAULT 0,
+  gap_since_last_success_s INTEGER,
+  last_observation_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  event_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  at_utc TEXT NOT NULL,
+  project_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
 """
+
+SCHEMA_VERSION = "2"
 
 
 def utc_now() -> str:
@@ -155,9 +178,147 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-        ("schema", "1"),
+        ("schema", SCHEMA_VERSION),
     )
     conn.commit()
+
+
+def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        (key, value),
+    )
+
+
+def infer_paused(conn: sqlite3.Connection) -> bool:
+    return get_meta(conn, "infer_paused", "0") == "1"
+
+
+def scan_paused(conn: sqlite3.Connection) -> bool:
+    return get_meta(conn, "scan_paused", "0") == "1"
+
+
+def insert_event(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    project_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    event_id: str | None = None,
+) -> str:
+    import json
+    import uuid
+
+    eid = event_id or f"evn_{uuid.uuid4().hex[:16]}"
+    conn.execute(
+        """
+        INSERT INTO events(event_id, kind, at_utc, project_id, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (eid, kind, utc_now(), project_id, json.dumps(payload or {}, ensure_ascii=False)),
+    )
+    return eid
+
+
+def last_scan_success(conn: sqlite3.Connection, project_id: str | None = None) -> sqlite3.Row | None:
+    if project_id:
+        return conn.execute(
+            """
+            SELECT * FROM scan_runs
+            WHERE project_id = ? AND outcome = 'success'
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT * FROM scan_runs
+        WHERE outcome = 'success'
+        ORDER BY finished_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def insert_scan_run(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO scan_runs(
+          run_id, project_id, started_at, finished_at, outcome, last_safe_error,
+          inserted, unchanged, gap_since_last_success_s, last_observation_id
+        ) VALUES (
+          :run_id, :project_id, :started_at, :finished_at, :outcome, :last_safe_error,
+          :inserted, :unchanged, :gap_since_last_success_s, :last_observation_id
+        )
+        """,
+        row,
+    )
+
+
+def insert_summary(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO summaries(
+          summary_id, project_id, observation_range, model_identifier, model_digest,
+          prompt_version, facts_json, interpretations_json, suggestions_json,
+          evidence_ids, validation_status, generated_at
+        ) VALUES (
+          :summary_id, :project_id, :observation_range, :model_identifier, :model_digest,
+          :prompt_version, :facts_json, :interpretations_json, :suggestions_json,
+          :evidence_ids, :validation_status, :generated_at
+        )
+        """,
+        row,
+    )
+
+
+def latest_summary_for_range(conn: sqlite3.Connection, project_id: str, observation_range: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM summaries
+        WHERE project_id = ? AND observation_range = ?
+        ORDER BY generated_at DESC
+        LIMIT 1
+        """,
+        (project_id, observation_range),
+    ).fetchone()
+
+
+def job_get(conn: sqlite3.Connection, deduplication_key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM jobs WHERE deduplication_key = ?",
+        (deduplication_key,),
+    ).fetchone()
+
+
+def upsert_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: str,
+    deduplication_key: str,
+    state: str,
+    retry_count: int = 0,
+    last_safe_error: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO jobs(job_id, deduplication_key, state, retry_count, not_before, last_safe_error)
+        VALUES (?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(deduplication_key) DO UPDATE SET
+          state=excluded.state,
+          retry_count=excluded.retry_count,
+          last_safe_error=excluded.last_safe_error
+        """,
+        (job_id, deduplication_key, state, retry_count, last_safe_error),
+    )
 
 
 @contextmanager
