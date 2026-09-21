@@ -58,6 +58,14 @@ python3.11 -m xiaomao --home "$XIAOMAO_HOME" resume scan
 停 Ollama：`/bin/sh scripts/user_stop_ollama.sh`  
 启动 Ollama：`/bin/sh scripts/user_serve_ollama.sh`
 
+本机 30b 对话（不是小猫 CLI；与 `hermes` / `claude` 一样打命令名）：
+
+```bash
+qwen3
+```
+
+退出：`/bye`。同时只加载 1 个模型；聊天时不要再跑 `xiaomao daily --with-model`。
+
 ## 调度
 
 - `ai.xiaomao.scan`：每 5 分钟只跑 `scan`（不加载模型）。已装，不要再装一份。

@@ -38,6 +38,8 @@ python3.11 -m xiaomao --home "$XIAOMAO_HOME" pause infer
 python3.11 -m xiaomao --home "$XIAOMAO_HOME" pause scan
 ```
 
+本机 30b 对话（不经小猫 CLI）：终端输入 `qwen3`，退出 `/bye`。脚本：`scripts/qwen3.sh`；PATH：`~/.local/bin/qwen3`。
+
 日报：`~/Library/Application Support/Xiaomao/reports/daily/`  
 30b 副本：同目录 `YYYY-MM-DD.model.txt`  
 Handoff：`~/Library/Application Support/Xiaomao/reports/handoff/`
