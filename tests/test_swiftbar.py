@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ def _write_home(root: Path) -> Path:
     (home / "reports" / "handoff").mkdir(parents=True)
     (home / "reports" / "projects").mkdir(parents=True)
     (home / "config.json").write_text(
-        '{"timezone": "Asia/Taipei", "schema_version": 1}\n',
+        json.dumps({'timezone': 'Asia/Taipei', 'schema_version': 1, 'projects': [{'project_id': 'website', 'approved_root': '/tmp/website', 'worktrees': [{'worktree_id': 'website-main', 'path': '/tmp/website', 'scan': True}]}]}),
         encoding="utf-8",
     )
     conn = sqlite3.connect(home / "xiaomao.sqlite")
@@ -118,13 +119,13 @@ class SwiftbarTests(unittest.TestCase):
         daily.write_text("日报\n", encoding="utf-8")
         os.utime(daily, (now.timestamp(), now.timestamp()))
         menu = render_menu(home, now=now)
-        self.assertIn("🐱 小猫｜上次检查：3 分钟前", menu)
+        self.assertIn("🐱 小猫｜交接待核实", menu)
         self.assertIn("最近一次扫描：成功", menu)
         self.assertIn("需要关注：0 项", menu)
         self.assertIn("日报更新时间：今天 22:40", menu)
         self.assertNotIn("信息已过期", menu)
-        self.assertIn("打开最新日报 | href=", menu)
-        self.assertIn(file_href(daily), menu)
+        self.assertIn("最新日报范围未核实", menu)
+        self.assertNotIn(file_href(daily), menu)
         self.assertIn("只读入口：不扫描业务仓、不加载模型", menu)
         self.assertNotIn("--with-model", menu)
         self.assertNotIn("xiaomao scan", menu)
@@ -151,8 +152,9 @@ class SwiftbarTests(unittest.TestCase):
         self.assertIn("最近一次扫描：失败", menu)
         self.assertIn("website-main 采集状态：error", menu)
         self.assertIn("website-main 工作区 dirty", menu)
-        self.assertIn("打开最新 Handoff | href=", menu)
-        self.assertIn(file_href(handoff), menu)
+        self.assertIn("website：未核实", menu)
+        self.assertIn("旧交接没有来源校验信息", menu)
+        self.assertIn("查看交接与未核实项：website | bash=", menu)
         self.assertIn("打开报告文件夹 | href=", menu)
 
     def test_missing_home_is_expired(self) -> None:

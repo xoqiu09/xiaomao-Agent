@@ -8,6 +8,35 @@ from xiaomao.config import AppConfig, ProjectSpec
 from xiaomao.store import latest_by_project
 
 
+def authorized_rows(conn, project: ProjectSpec) -> list[dict]:
+    """Read facts only after immutable observation provenance matches scope.
+
+    Updating registrations with init must not re-label an old observation as a
+    different repository. Disabled or unobserved trees have no readable facts.
+    """
+    from xiaomao.handoff_view import snapshot
+    from xiaomao.scope import project_exclusion_reason
+
+    if project_exclusion_reason(project):
+        return []
+    state = snapshot(conn, project)
+    allowed = [row["worktree_id"] for row in state["observations"]
+               if row.get("observed_path") and row.get("registered_path")
+               and str(Path(row["observed_path"]).resolve()) == row["path"]
+               and str(Path(row["registered_path"]).resolve()) == row["path"]]
+    existing = {row["worktree_id"]: dict(row) for row in latest_by_project(conn, project.project_id, allowed)}
+    out = []
+    for wt in project.worktrees:
+        row = existing.get(wt.worktree_id) or dict.fromkeys((
+            "observation_id", "observed_at_utc", "head_oid", "branch_ref", "collection_status",
+            "is_unborn", "is_detached", "staged_count", "unstaged_count", "untracked_count", "facts_json",
+        ))
+        row.update(worktree_id=wt.worktree_id, canonical_path=str(Path(wt.path).resolve()),
+                   scan_enabled=wt.scan, notes=wt.notes)
+        out.append(row)
+    return out
+
+
 def _short(oid: str | None) -> str:
     if not oid:
         return "—"
@@ -106,9 +135,15 @@ def render_project_status(cfg: AppConfig, project: ProjectSpec, rows) -> str:
 
 
 def write_project_report(cfg: AppConfig, project: ProjectSpec, rows, dest: Path) -> Path:
+    from xiaomao.scope import project_exclusion_reason
+    from xiaomao.report_access import bind_report
+
+    if reason := project_exclusion_reason(project):
+        raise ValueError(reason)
     dest.parent.mkdir(parents=True, exist_ok=True)
     text = render_project_status(cfg, project, rows)
     dest.write_text(text, encoding="utf-8")
+    bind_report(dest, text, cfg, "status", project.project_id)
     return dest
 
 
@@ -123,7 +158,11 @@ def status_text(conn, cfg: AppConfig, project_id: str) -> str:
     from xiaomao.store import infer_paused, last_scan_success, scan_paused
 
     project = cfg.project(project_id)
-    rows = latest_by_project(conn, project_id)
+    from xiaomao.scope import project_exclusion_reason
+
+    if reason := project_exclusion_reason(project):
+        raise ValueError(reason)
+    rows = authorized_rows(conn, project)
     last = last_scan_success(conn, project_id)
     last_s = last["finished_at"] if last and last["finished_at"] else "尚无 scan_runs 成功记录"
     header = [

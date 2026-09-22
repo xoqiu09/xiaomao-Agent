@@ -9,6 +9,7 @@ from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec
 from xiaomao.git_readonly import GitSnapshot, collect_snapshot, snapshot_fingerprint
 from xiaomao.ops import GAP_WARN_AFTER_S, gap_seconds_since
 from xiaomao.policy import path_is_denied
+from xiaomao.scope import project_exclusion_reason, worktree_exclusion_reason
 from xiaomao.store import (
     evidence_for_observation,
     insert_event,
@@ -29,7 +30,45 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _matches_observation(row, fingerprint: str, collection_status: str) -> bool:
+    if not row or row["collection_status"] != collection_status:
+        return False
+    # The existing schema makes each stored fingerprint unique for a tree.
+    # A later occurrence of a historical snapshot gets an occurrence suffix;
+    # compare its original fingerprint so the next identical scan is a no-op.
+    return row["fingerprint"] in {
+        fingerprint,
+        f"{fingerprint}:reobserved:{row['observation_id']}",
+    }
+
+
+def _insert_observation_occurrence(conn, row: dict) -> tuple[bool, str]:
+    fingerprint = row["fingerprint"]
+    latest = latest_observation(conn, row["worktree_id"])
+    if _matches_observation(latest, fingerprint, row["collection_status"]):
+        return False, latest["observation_id"]
+    if insert_observation(conn, row):
+        return True, row["observation_id"]
+
+    # A concurrent identical observation can be reused. A historical match
+    # cannot: it would keep the intervening state as the latest observation.
+    latest = latest_observation(conn, row["worktree_id"])
+    if _matches_observation(latest, fingerprint, row["collection_status"]):
+        return False, latest["observation_id"]
+    collision = conn.execute(
+        "SELECT 1 FROM observations WHERE worktree_id = ? AND fingerprint = ?",
+        (row["worktree_id"], fingerprint),
+    ).fetchone()
+    if not collision:
+        raise RuntimeError("无法保存本次观察；未将写入失败标记为 unchanged")
+    row["fingerprint"] = f"{fingerprint}:reobserved:{row['observation_id']}"
+    if not insert_observation(conn, row):
+        raise RuntimeError("无法保存历史状态的本次重现；未复用无关观察")
+    return True, row["observation_id"]
+
+
 def register_project(conn, cfg: AppConfig, project: ProjectSpec) -> None:
+    exclusion = project_exclusion_reason(project)
     upsert_project(conn, project.project_id, project.display_name, project.approved_root, cfg.policy_version)
     for wt in project.worktrees:
         upsert_worktree(
@@ -38,8 +77,8 @@ def register_project(conn, cfg: AppConfig, project: ProjectSpec) -> None:
             project_id=project.project_id,
             canonical_path=str(Path(wt.path).expanduser()),
             common_git_dir_id=None,
-            scan_enabled=wt.scan,
-            notes=wt.notes,
+            scan_enabled=wt.scan and exclusion is None,
+            notes="；".join(part for part in (wt.notes, exclusion) if part),
         )
 
 
@@ -84,6 +123,14 @@ def _facts(snap: GitSnapshot, worktree_id: str, extra: dict | None = None) -> di
 
 
 def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) -> dict:
+    exclusion = project_exclusion_reason(project) or worktree_exclusion_reason(wt.path)
+    if exclusion:
+        return {
+            "worktree_id": wt.worktree_id,
+            "status": "excluded",
+            "inserted": False,
+            "reason": exclusion,
+        }
     path = Path(wt.path).expanduser()
     observed_at = utc_now()
     try:
@@ -91,7 +138,7 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
     except Exception as exc:
         observation_id = _new_id("obs")
         fingerprint = f"error:{type(exc).__name__}:{path}"
-        inserted = insert_observation(
+        inserted, observation_id = _insert_observation_occurrence(
             conn,
             {
                 "observation_id": observation_id,
@@ -126,12 +173,12 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
             "status": "error",
             "inserted": inserted,
             "error": str(exc)[:400],
-            "observation_id": observation_id if inserted else None,
+            "observation_id": observation_id,
         }
 
     fingerprint = snapshot_fingerprint(snap)
     last = latest_observation(conn, wt.worktree_id)
-    if last and last["fingerprint"] == fingerprint and last["collection_status"] == snap.collection_status:
+    if _matches_observation(last, fingerprint, snap.collection_status):
         # Still record discovered worktrees so new trees surface as candidates.
         _record_discovered(conn, project, wt, snap)
         upsert_worktree(
@@ -156,7 +203,7 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
     observation_id = _new_id("obs")
     facts = _facts(snap, wt.worktree_id)
     dirty_id = fingerprint if (snap.staged or snap.unstaged or snap.untracked) else None
-    inserted = insert_observation(
+    inserted, observation_id = _insert_observation_occurrence(
         conn,
         {
             "observation_id": observation_id,
@@ -180,12 +227,11 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
     )
     if not inserted:
         _record_discovered(conn, project, wt, snap)
-        last = latest_observation(conn, wt.worktree_id)
         return {
             "worktree_id": wt.worktree_id,
             "status": "unchanged",
             "inserted": False,
-            "observation_id": last["observation_id"] if last else None,
+            "observation_id": observation_id,
             "fingerprint": fingerprint,
             "head_oid": snap.head_oid,
             "branch_ref": snap.branch_ref,
@@ -278,7 +324,9 @@ def _record_scan_run(
     outcome: str,
     results: list[dict],
     last_safe_error: str | None = None,
+    scope_sha256: str | None = None,
 ) -> None:
+    run_id = _new_id("run")
     finished = utc_now()
     prev = last_scan_success(conn, project_id)
     gap = gap_seconds_since(prev["finished_at"] if prev else None, started_at)
@@ -290,7 +338,7 @@ def _record_scan_run(
     insert_scan_run(
         conn,
         {
-            "run_id": _new_id("run"),
+            "run_id": run_id,
             "project_id": project_id,
             "started_at": started_at,
             "finished_at": finished,
@@ -307,6 +355,13 @@ def _record_scan_run(
         kind=f"scan_{outcome}",
         project_id=project_id,
         payload={
+            "run_id": run_id,
+            "scope_sha256": scope_sha256,
+            "observation_ids": [
+                {"worktree_id": row["worktree_id"], "observation_id": row["observation_id"]}
+                for row in results
+                if row.get("observation_id") and row.get("worktree_id")
+            ],
             "inserted": sum(1 for r in results if r.get("inserted")),
             "unchanged": sum(1 for r in results if r.get("status") == "unchanged"),
             "gap_since_last_success_s": gap,
@@ -326,9 +381,22 @@ def _record_scan_run(
 
 
 def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
+    from xiaomao.handoff_view import scope_identity
+
     started = utc_now()
     project = cfg.project(project_id)
     register_project(conn, cfg, project)
+    exclusion = project_exclusion_reason(project)
+    if exclusion:
+        _record_scan_run(
+            conn,
+            project_id=project_id,
+            started_at=started,
+            outcome="skip",
+            results=[],
+            last_safe_error=exclusion,
+        )
+        return [{"project": project_id, "status": "excluded", "inserted": False, "reason": exclusion}]
     if scan_paused(conn):
         _record_scan_run(
             conn,
@@ -339,13 +407,27 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
             last_safe_error="scan_paused",
         )
         return [{"project": project_id, "status": "paused", "inserted": False}]
+    scan_scope_sha256 = scope_identity(project)
     results: list[dict] = []
     for wt in project.worktrees:
         if not wt.scan:
             continue
         results.append(scan_worktree(conn, cfg, project, wt))
     errors = [r.get("error") for r in results if r.get("status") == "error"]
-    outcome = "error" if errors and not any(r.get("status") != "error" for r in results) else "success"
+    exclusions = [r.get("reason") for r in results if r.get("status") == "excluded"]
+    if not results:
+        outcome = "skip"
+        errors = ["no_enabled_worktrees"]
+    elif errors:
+        outcome = "error"
+        errors.extend(exclusions)
+    elif exclusions:
+        # A link can change after the project check. The per-tree guard must
+        # not turn that refusal into a successful scan heartbeat.
+        outcome = "skip"
+        errors.extend(exclusions)
+    else:
+        outcome = "success"
     _record_scan_run(
         conn,
         project_id=project_id,
@@ -353,6 +435,7 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
         outcome=outcome,
         results=results,
         last_safe_error="; ".join(str(e) for e in errors if e)[:400] or None,
+        scope_sha256=scan_scope_sha256 if outcome in {"success", "error"} else None,
     )
     return results
 

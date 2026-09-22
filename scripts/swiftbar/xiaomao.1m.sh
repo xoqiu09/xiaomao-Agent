@@ -13,6 +13,7 @@
 # <swiftbar.runInBash>true</swiftbar.runInBash>
 
 set -e
-export PYTHONPATH="/Users/xiuqiu/WorkSpace/xiaomao-Agent/src"
+PYTHON="${XIAOMAO_PYTHON:-/Users/xiuqiu/.local/bin/python3.11}"
+export PYTHONPATH="$("$PYTHON" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().parents[2] / "src")' "$0")"
 export XIAOMAO_HOME="${XIAOMAO_HOME:-$HOME/Library/Application Support/Xiaomao}"
-exec /Users/xiuqiu/.local/bin/python3.11 -m xiaomao.swiftbar
+exec "$PYTHON" -m xiaomao.swiftbar

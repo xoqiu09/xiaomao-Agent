@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,7 +14,8 @@ from zoneinfo import ZoneInfo
 from xiaomao.config import AppConfig, ProjectSpec
 from xiaomao.ops import GAP_WARN_AFTER_S, gap_seconds_since
 from xiaomao.paths import layout
-from xiaomao.render import _branch_label, _short, render_project_status
+from xiaomao.render import _branch_label, _short, render_project_status, authorized_rows
+from xiaomao.scope import project_exclusion_reason
 from xiaomao.store import last_scan_success, latest_by_project, utc_now
 
 
@@ -65,7 +69,9 @@ def render_daily(cfg: AppConfig, conn, *, date: str, model_note: str | None = No
     ]
 
     for project in cfg.projects:
-        rows = latest_by_project(conn, project.project_id)
+        if project_exclusion_reason(project):
+            continue
+        rows = authorized_rows(conn, project)
         last_run = last_scan_success(conn, project.project_id)
         lines.append(f"项目：{project.display_name}（{project.project_id}）")
         lines.append("-" * 24)
@@ -210,8 +216,12 @@ def write_daily(
     dest.parent.mkdir(parents=True, exist_ok=True)
     text = render_daily(cfg, conn, date=date, model_note=model_note)
     dest.write_text(text, encoding="utf-8")
+    from xiaomao.report_access import bind_report
+
+    bind_report(dest, text, cfg, "daily")
     if model_ok and model_note:
         daily_model_path(cfg, date).write_text(text, encoding="utf-8")
+        bind_report(daily_model_path(cfg, date), text, cfg, "daily")
     return dest
 
 
@@ -222,6 +232,7 @@ def render_handoff(
     *,
     model_note: str | None = None,
     extra_unknown: list[str] | None = None,
+    generated_at: str | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f"小猫 Handoff — {project.display_name}")
@@ -229,7 +240,7 @@ def render_handoff(
     lines.append(f"project_id：{project.project_id}")
     lines.append(f"授权根：{project.approved_root}")
     lines.append(f"时区：{cfg.timezone}")
-    lines.append(f"生成时间（UTC）：{utc_now()}")
+    lines.append(f"生成时间（UTC）：{generated_at or utc_now()}")
     lines.append("")
     lines.append("约束")
     lines.append("----")
@@ -256,7 +267,9 @@ def render_handoff(
 
 
 def handoff_path(cfg: AppConfig, project_id: str) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project_id):
+        raise ValueError("invalid project ID")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return layout(Path(cfg.home))["reports_handoff"] / f"{project_id}-{stamp}.txt"
 
 
@@ -267,18 +280,36 @@ def write_handoff(
     *,
     model_note: str | None = None,
 ) -> Path:
+    from xiaomao.handoff_view import metadata_for
+    from xiaomao.scope import project_exclusion_reason
+
     project = cfg.project(project_id)
-    rows = latest_by_project(conn, project_id)
+    if reason := project_exclusion_reason(project):
+        raise ValueError(reason)
+    rows = authorized_rows(conn, project)
     dest = handoff_path(cfg, project_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(render_handoff(cfg, project, rows, model_note=model_note), encoding="utf-8")
+    generated_at = utc_now()
+    body = render_handoff(cfg, project, rows, model_note=model_note, generated_at=generated_at)
+    meta = metadata_for(conn, project, body, generated_at)
+    # A reader encountering only one half of the pair reports unverified. It
+    # never falls back to an older successful handoff.
+    for path, text in ((dest, body), (dest.with_suffix(".json"), json.dumps(meta, ensure_ascii=False, indent=2) + "\n")):
+        tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
     return dest
 
 
 def facts_payload(cfg: AppConfig, conn, project_id: str) -> dict[str, Any]:
     """Program-generated facts. The model must not rewrite these fields."""
     project = cfg.project(project_id)
-    rows = latest_by_project(conn, project_id)
+    if reason := project_exclusion_reason(project):
+        raise ValueError(reason)
+    rows = authorized_rows(conn, project)
     worktrees = []
     evidence_ids: list[str] = []
     for row in rows:

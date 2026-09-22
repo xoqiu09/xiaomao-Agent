@@ -13,7 +13,8 @@ from xiaomao.config import VolumeIdentityError, load_config, save_config
 from xiaomao.collect import register_project, scan_authorized
 from xiaomao.doctor import collect_doctor, format_doctor
 from xiaomao.paths import default_home, ensure_layout, layout
-from xiaomao.render import default_report_path, status_text, write_project_report
+from xiaomao.render import default_report_path, status_text, write_project_report, authorized_rows
+from xiaomao.scope import project_exclusion_reason
 from xiaomao.lock import ScanLock
 from xiaomao.store import (
     insert_event,
@@ -81,7 +82,9 @@ def cmd_scan(ns: argparse.Namespace) -> int:
             if ns.write_report:
                 if not project_id:
                     raise RuntimeError("--write-report 需要 --project")
-                rows = latest_by_project(conn, project_id)
+                if reason := project_exclusion_reason(cfg.project(project_id)):
+                    raise ValueError(reason)
+                rows = authorized_rows(conn, cfg.project(project_id))
                 dest = write_project_report(
                     cfg, cfg.project(project_id), rows, default_report_path(cfg, project_id)
                 )
@@ -127,7 +130,7 @@ def cmd_scan(ns: argparse.Namespace) -> int:
             indent=2,
         )
         sys.stdout.write("\n")
-        return 0
+        return 3
     if project_id:
         payload = {
             "project": project_id,
@@ -136,14 +139,20 @@ def cmd_scan(ns: argparse.Namespace) -> int:
         }
     else:
         payload = {"projects": by_project, "report": str(dest) if dest else None}
+    results = [row for rows in by_project.values() for row in rows]
+    failed = not results or any(row.get("status") not in ("ok", "unchanged") for row in results)
+    payload["outcome"] = "incomplete" if failed else "success"
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
-    return 0
+    return 3 if failed else 0
 
 
 def cmd_status(ns: argparse.Namespace) -> int:
     home = _home_from_args(ns)
     cfg = load_config(home)
+    if reason := project_exclusion_reason(cfg.project(ns.project)):
+        sys.stderr.write(f"范围已排除：{reason}\n")
+        return 3
     db = layout(home)["db"]
     if not db.exists():
         sys.stderr.write("数据库不存在。先运行：xiaomao init 或 xiaomao scan\n")
@@ -151,7 +160,7 @@ def cmd_status(ns: argparse.Namespace) -> int:
     with open_db(db) as conn:
         text = status_text(conn, cfg, ns.project)
         if ns.write_report:
-            rows = latest_by_project(conn, ns.project)
+            rows = authorized_rows(conn, cfg.project(ns.project))
             dest = write_project_report(cfg, cfg.project(ns.project), rows, default_report_path(cfg, ns.project))
             sys.stdout.write(text)
             sys.stdout.write(f"\n写入 {dest}\n")
@@ -184,8 +193,20 @@ def _maybe_model_note(
     from xiaomao.reports import facts_payload
     from xiaomao.summarize import degrade_note, summarize_or_degrade
 
-    pid = project_id or cfg.projects[0].project_id
+    eligible = [p for p in cfg.projects if not project_exclusion_reason(p)]
+    if not eligible:
+        return None, False
+    pid = project_id or eligible[0].project_id
+    if project_exclusion_reason(cfg.project(pid)):
+        return None, False
+    from xiaomao.handoff_view import snapshot, scan_covers_scope
+
+    current = snapshot(conn, cfg.project(pid))
+    if not current["scan"] or not scan_covers_scope(current["scan"], current["observations"], cfg.project(pid)):
+        return None, False
     facts = facts_payload(cfg, conn, pid)
+    if not any(w.get("observation_id") for w in facts["worktrees"]):
+        return None, False
     call, reason = should_call_depth_model(conn, facts, with_model=with_model, scheduled=scheduled)
     if not call:
         if reason.startswith("dedup:"):
@@ -255,6 +276,10 @@ def cmd_daily(ns: argparse.Namespace) -> int:
     ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
+    cfg.projects = [p for p in cfg.projects if not project_exclusion_reason(p)]
+    if not cfg.projects:
+        sys.stderr.write("尚无可读取的个人项目；未生成日报、未加载模型。\n")
+        return 3
     date = ns.date or local_today(cfg)
     scheduled = bool(getattr(ns, "scheduled", False))
     with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
@@ -266,16 +291,24 @@ def cmd_daily(ns: argparse.Namespace) -> int:
 
 def cmd_handoff(ns: argparse.Namespace) -> int:
     from xiaomao.reports import write_handoff
+    from xiaomao.scope import project_exclusion_reason
+    from xiaomao.handoff_view import inspect_handoff
 
     home = _home_from_args(ns)
     ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
+    if reason := project_exclusion_reason(cfg.project(ns.project)):
+        sys.stderr.write(f"范围已排除：{reason}\n")
+        return 3
     with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
         note, _ok = _maybe_model_note(ns, cfg, conn, ns.project, scheduled=False)
         dest = write_handoff(cfg, conn, ns.project, model_note=note)
     sys.stdout.write(f"{dest}\n")
-    return 0
+    view = inspect_handoff(home, ns.project)
+    if view.exit_code:
+        sys.stderr.write(view.text())
+    return view.exit_code
 
 
 def cmd_eval(ns: argparse.Namespace) -> int:
@@ -420,13 +453,26 @@ def cmd_latest(ns: argparse.Namespace) -> int:
     from xiaomao.ops import latest_report
 
     home = _home_from_args(ns)
+    if ns.kind == "handoff":
+        from xiaomao.handoff_view import inspect_handoff
+
+        view = inspect_handoff(home, ns.project)
+        sys.stdout.write(view.text(include_body=getattr(ns, "print", False)))
+        return view.exit_code
     path = latest_report(home, ns.kind, getattr(ns, "project", "website") or "website")
     if path is None:
         sys.stderr.write(f"没有找到 {ns.kind} 报告\n")
         return 2
+    from xiaomao.report_access import read_bound_report
+
+    try:
+        body = read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+    except (OSError, ValueError):
+        sys.stderr.write("旧报告范围或来源未核实；请重新生成当前授权项目的报告。\n")
+        return 3
     sys.stdout.write(f"{path}\n")
     if getattr(ns, "print", False):
-        sys.stdout.write(path.read_text(encoding="utf-8"))
+        sys.stdout.write(body)
     return 0
 
 
@@ -434,7 +480,24 @@ def cmd_open(ns: argparse.Namespace) -> int:
     from xiaomao.ops import latest_report
 
     home = _home_from_args(ns)
-    path = latest_report(home, ns.kind, getattr(ns, "project", "website") or "website")
+    if ns.kind == "handoff":
+        from xiaomao.handoff_view import inspect_handoff
+
+        view = inspect_handoff(home, ns.project)
+        sys.stdout.write(view.text())
+        if view.exit_code:
+            return view.exit_code
+        path = view.path
+    else:
+        path = latest_report(home, ns.kind, getattr(ns, "project", "website") or "website")
+        if path is not None:
+            from xiaomao.report_access import read_bound_report
+
+            try:
+                read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+            except (OSError, ValueError):
+                sys.stderr.write("旧报告范围或来源未核实；未打开。\n")
+                return 3
     if path is None:
         sys.stderr.write(f"没有找到 {ns.kind} 报告\n")
         return 2
@@ -595,15 +658,15 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("target", choices=["infer", "scan"])
     resume.set_defaults(func=cmd_resume)
 
-    lat = sub.add_parser("latest", help="打印最新报告的绝对路径")
+    lat = sub.add_parser("latest", help="查最新报告；交接会核对来源、时效与未核实项")
     lat.add_argument("kind", choices=["daily", "handoff", "status"])
-    lat.add_argument("--project", default="website")
+    lat.add_argument("--project", help="handoff 多项目时必填")
     lat.add_argument("--print", action="store_true", dest="print")
     lat.set_defaults(func=cmd_latest)
 
     op = sub.add_parser("open", help="用系统 open 打开最新报告")
     op.add_argument("kind", choices=["daily", "handoff", "status"])
-    op.add_argument("--project", default="website")
+    op.add_argument("--project", help="handoff 多项目时必填")
     op.set_defaults(func=cmd_open)
 
     he = sub.add_parser("health", help="运行健康与调度状态")

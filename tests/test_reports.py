@@ -286,7 +286,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         self.assertEqual(main(["--home", str(home), "pause", "scan"]), 0)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            self.assertEqual(main(["--home", str(home), "scan", "--project", "website"]), 0)
+            self.assertEqual(main(["--home", str(home), "scan", "--project", "website"]), 3)
         self.assertIn("paused", buf.getvalue())
         with open_db(home / "xiaomao.sqlite") as conn:
             skipped = conn.execute("SELECT COUNT(*) AS n FROM scan_runs WHERE outcome='skip'").fetchone()["n"]

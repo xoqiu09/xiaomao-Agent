@@ -1,18 +1,26 @@
 """Read-only SwiftBar menu for Xiaomao.
 
 Reads existing SQLite + report files. Does not scan worktrees, does not
-load a model, does not take the scan lock, and does not write the data dir.
+load a model or take the scan lock. SQLite may manage WAL/SHM coordination
+files; application rows and report/config contents are never written.
 """
 
 from __future__ import annotations
 
 import json
+import base64
+import shlex
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
+
+from xiaomao.config import load_config
+from xiaomao.handoff_view import inspect_handoff
+from xiaomao.scope import project_exclusion_reason
 
 # Keep in lockstep with xiaomao.ops.GAP_WARN_AFTER_S (two missed 5-minute ticks + 60s).
 STALE_AFTER_S = 300 * 2 + 60
@@ -137,7 +145,7 @@ def _row_get(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _read_state(home: Path) -> dict[str, Any]:
+def _read_state(home: Path, project_ids: list[str]) -> dict[str, Any]:
     state: dict[str, Any] = {
         "db_ok": False,
         "db_busy": False,
@@ -154,6 +162,9 @@ def _read_state(home: Path) -> dict[str, Any]:
     if not db.is_file():
         state["db_missing"] = True
         return state
+    if not project_ids:
+        state["error"] = "no_authorized_projects"
+        return state
     try:
         conn = _connect_ro(db)
     except sqlite3.Error as exc:
@@ -163,23 +174,23 @@ def _read_state(home: Path) -> dict[str, Any]:
         return state
     try:
         try:
+            marks = ",".join("?" for _ in project_ids)
             state["last_run"] = conn.execute(
-                """
+                f"""
                 SELECT outcome, finished_at, last_safe_error, inserted, unchanged
                 FROM scan_runs
-                ORDER BY finished_at DESC
+                WHERE project_id IN ({marks})
+                ORDER BY finished_at DESC, rowid DESC
                 LIMIT 1
-                """
+                """, project_ids,
             ).fetchone()
-            state["last_success"] = conn.execute(
-                """
-                SELECT outcome, finished_at, last_safe_error, inserted, unchanged
-                FROM scan_runs
-                WHERE outcome = 'success'
-                ORDER BY finished_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
+            successes = [conn.execute(
+                "SELECT outcome, finished_at, last_safe_error, inserted, unchanged "
+                "FROM scan_runs WHERE outcome='success' AND project_id=? "
+                "ORDER BY finished_at DESC, rowid DESC LIMIT 1", (pid,),
+            ).fetchone() for pid in project_ids]
+            if all(row is not None for row in successes):
+                state["last_success"] = min(successes, key=lambda row: row["finished_at"])
         except sqlite3.Error as exc:
             state["error"] = type(exc).__name__
             return state
@@ -196,7 +207,7 @@ def _read_state(home: Path) -> dict[str, Any]:
         try:
             state["worktrees"] = list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT
                       w.worktree_id AS worktree_id,
                       w.scan_enabled AS scan_enabled,
@@ -208,11 +219,12 @@ def _read_state(home: Path) -> dict[str, Any]:
                     FROM worktrees w
                     LEFT JOIN observations o ON o.observation_id = (
                       SELECT observation_id FROM observations
-                      WHERE worktree_id = w.worktree_id
-                      ORDER BY observed_at_utc DESC LIMIT 1
+                      WHERE worktree_id = w.worktree_id AND project_id = w.project_id
+                      ORDER BY observed_at_utc DESC, rowid DESC LIMIT 1
                     )
+                    WHERE w.project_id IN ({marks})
                     ORDER BY w.worktree_id
-                    """
+                    """, project_ids,
                 )
             )
         except sqlite3.Error:
@@ -307,7 +319,14 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     tz = _tz(tz_name)
     now_utc = _now_utc(now)
     now_local = now_utc.astimezone(tz)
-    state = _read_state(home)
+    cfg = None
+    try:
+        cfg = load_config(home) if (home / "config.json").is_file() else None
+        projects = [p for p in cfg.projects if not project_exclusion_reason(p)] if cfg else []
+    except (OSError, ValueError, KeyError, TypeError):
+        projects = []
+    state = _read_state(home, [p.project_id for p in projects])
+    views = [inspect_handoff(home, p.project_id, now=now_utc) for p in projects]
 
     last_run = state.get("last_run")
     last_success = state.get("last_success")
@@ -320,17 +339,18 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
 
     stale = True
     if state.get("db_ok") and success_age_s is not None:
-        stale = success_age_s > STALE_AFTER_S
+        stale = success_age_s > STALE_AFTER_S or last_success_at > now_utc
     if state.get("db_missing") or state.get("db_busy") or not state.get("db_ok"):
         stale = True
 
     attention = _attention(state, stale=stale)
     daily = latest_daily(home)
-    handoff = latest_handoff(home)
     reports = reports_dir(home)
 
     if stale:
         title = "🐱 小猫｜信息已过期"
+    elif any(v.exit_code for v in views):
+        title = "🐱 小猫｜交接待核实"
     elif age_s is None:
         title = "🐱 小猫｜尚无扫描"
     else:
@@ -358,14 +378,39 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
             lines.append(_escape(item))
 
     lines.append("---")
-    if daily is not None and daily.is_file():
+    daily_verified = False
+    if daily is not None and daily.is_file() and cfg:
+        from xiaomao.report_access import read_bound_report
+        try:
+            read_bound_report(daily, home, cfg, "daily")
+            daily_verified = True
+        except (OSError, ValueError):
+            pass
+    if daily_verified:
         lines.append(f"打开最新日报 | href={file_href(daily)}")
+    elif daily is not None:
+        lines.append("最新日报范围未核实（旧文件保留，需重新生成）")
     else:
         lines.append("打开最新日报（尚无文件）")
-    if handoff is not None and handoff.is_file():
-        lines.append(f"打开最新 Handoff | href={file_href(handoff)}")
-    else:
-        lines.append("打开最新 Handoff（尚无文件）")
+    lines.append("---")
+    lines.append("最新交接 / 未核实项")
+    if not views:
+        lines.append("尚无可读取的个人项目配置")
+    for view in views:
+        lines.append(_escape(f"{view.project_id}：{view.status}"))
+        lines.append(_escape(view.reason))
+        lines.append(_escape(f"生成（UTC）：{view.generated_at or 'unknown'}"))
+        lines.append(_escape(f"采集核对截至（UTC）：{view.collected_through or 'unknown'}"))
+        # Only encoded data crosses SwiftBar's shell-action boundary. The
+        # executable and script are fixed; the reader repeats validation.
+        payload = base64.urlsafe_b64encode(json.dumps([str(home.resolve()), view.project_id]).encode()).decode()
+        reader = Path(__file__).resolve().parents[2] / "scripts" / "read-handoff.py"
+        lines.append(
+            f"{_escape('查看交接与未核实项：' + str(view.project_id))} | "
+            f"bash={shlex.quote(sys.executable)} param1={shlex.quote(str(reader))} "
+            f"param2={payload} terminal=true"
+        )
+    lines.append("测试：unknown / 部署及验收：unknown；查询不会更新资料")
     if reports.is_dir():
         lines.append(f"打开报告文件夹 | href={file_href(reports)}")
     else:

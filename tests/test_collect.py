@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec, default_config
+from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec, default_config, load_config, save_config
 from xiaomao.collect import register_project, scan_authorized, scan_worktree
+from xiaomao.handoff_view import scope_identity
 from xiaomao.policy import looks_like_secret, path_is_denied, redact_text, safe_excerpt_from_bytes
-from xiaomao.store import evidence_for_observation, open_db
+from xiaomao.scope import project_exclusion_reason
+from xiaomao.store import evidence_for_observation, latest_observation, open_db
 from tests.helpers import git, init_repo
 
 
@@ -43,6 +47,119 @@ class CollectTests(unittest.TestCase):
         self.assertFalse(second["inserted"])
         self.assertEqual(second["status"], "unchanged")
         self.assertEqual(n, 1)
+
+    def test_return_to_historical_state_creates_new_observation_then_deduplicates(self) -> None:
+        root = self._tmp()
+        repo = init_repo(root / "repo")
+        home = root / "home"
+        cfg, project, wt = _cfg(home, repo)
+        with open_db(home / "xiaomao.sqlite") as conn, patch(
+            "xiaomao.collect.utc_now", return_value="2026-09-22T12:00:00+00:00"
+        ):
+            register_project(conn, cfg, project)
+            first = scan_worktree(conn, cfg, project, wt)
+            original = dict(latest_observation(conn, wt.worktree_id))
+            changed_file = repo / "new-file.txt"
+            changed_file.write_text("temporary fixture change\n", encoding="utf-8")
+            changed = scan_worktree(conn, cfg, project, wt)
+            changed_file.unlink()
+            restored = scan_worktree(conn, cfg, project, wt)
+            repeated = scan_worktree(conn, cfg, project, wt)
+            latest = dict(latest_observation(conn, wt.worktree_id))
+            rows = list(conn.execute("SELECT * FROM observations ORDER BY rowid"))
+        self.assertTrue(restored["inserted"])
+        self.assertEqual(restored["fingerprint"], first["fingerprint"])
+        self.assertNotIn(restored["observation_id"], {first["observation_id"], changed["observation_id"]})
+        self.assertEqual(latest["observation_id"], restored["observation_id"])
+        self.assertEqual(latest["untracked_count"], 0)
+        self.assertEqual(repeated["observation_id"], restored["observation_id"])
+        self.assertEqual(repeated["status"], "unchanged")
+        self.assertFalse(repeated["inserted"])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(dict(rows[0]), original)
+
+    def test_error_after_recovery_creates_new_observation_then_deduplicates(self) -> None:
+        root = self._tmp()
+        repo = root / "repo"
+        home = root / "home"
+        cfg, project, wt = _cfg(home, repo)
+        with open_db(home / "xiaomao.sqlite") as conn, patch(
+            "xiaomao.collect.utc_now", return_value="2026-09-22T12:00:00+00:00"
+        ):
+            register_project(conn, cfg, project)
+            first_error = scan_worktree(conn, cfg, project, wt)
+            original = dict(latest_observation(conn, wt.worktree_id))
+            init_repo(repo)
+            recovered = scan_worktree(conn, cfg, project, wt)
+            repo.rename(root / "moved-repo")
+            new_error = scan_worktree(conn, cfg, project, wt)
+            repeated = scan_worktree(conn, cfg, project, wt)
+            latest = dict(latest_observation(conn, wt.worktree_id))
+            rows = list(conn.execute("SELECT * FROM observations ORDER BY rowid"))
+        self.assertTrue(recovered["inserted"])
+        self.assertTrue(new_error["inserted"])
+        self.assertNotEqual(new_error["observation_id"], first_error["observation_id"])
+        self.assertEqual(latest["collection_status"], "error")
+        self.assertEqual(latest["observation_id"], new_error["observation_id"])
+        self.assertFalse(repeated["inserted"])
+        self.assertEqual(repeated["status"], "error")
+        self.assertEqual(repeated["observation_id"], new_error["observation_id"])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(dict(rows[0]), original)
+
+    def test_mixed_success_and_error_is_not_a_successful_project_scan(self) -> None:
+        root = self._tmp()
+        repo = init_repo(root / "repo")
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, repo)
+        project.worktrees.append(WorktreeSpec("t-missing", str(root / "missing-repo")))
+        with open_db(home / "xiaomao.sqlite") as conn:
+            results = scan_authorized(conn, cfg)[project.project_id]
+            run = conn.execute("SELECT run_id, outcome, last_safe_error FROM scan_runs").fetchone()
+            event = conn.execute("SELECT payload_json FROM events WHERE kind='scan_error'").fetchone()
+            successful = conn.execute("SELECT COUNT(*) FROM scan_runs WHERE outcome='success'").fetchone()[0]
+        self.assertEqual({result["status"] for result in results}, {"ok", "error"})
+        self.assertEqual(run["outcome"], "error")
+        self.assertTrue(run["last_safe_error"])
+        self.assertEqual(successful, 0)
+        proof = json.loads(event["payload_json"])
+        self.assertEqual(proof["run_id"], run["run_id"])
+        self.assertEqual(proof["scope_sha256"], scope_identity(project))
+        self.assertEqual(
+            {row["worktree_id"]: row["observation_id"] for row in proof["observation_ids"]},
+            {row["worktree_id"]: row["observation_id"] for row in results},
+        )
+
+    def test_success_event_proves_current_run_scope_and_all_tree_observations(self) -> None:
+        root = self._tmp()
+        first_repo = init_repo(root / "first")
+        second_repo = init_repo(root / "second")
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, first_repo)
+        second_tree = WorktreeSpec("t-second", str(second_repo))
+        project.worktrees.append(second_tree)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            for _ in range(2):
+                results = scan_authorized(conn, cfg)[project.project_id]
+                run = conn.execute("SELECT * FROM scan_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+                event = conn.execute("SELECT * FROM events WHERE kind='scan_success' ORDER BY rowid DESC LIMIT 1").fetchone()
+                proof = json.loads(event["payload_json"])
+                self.assertEqual(proof["run_id"], run["run_id"])
+                self.assertEqual(proof["scope_sha256"], scope_identity(project))
+                self.assertEqual(event["project_id"], project.project_id)
+                self.assertEqual(
+                    {row["worktree_id"]: row["observation_id"] for row in proof["observation_ids"]},
+                    {row["worktree_id"]: row["observation_id"] for row in results},
+                )
+                self.assertEqual(len(proof["observation_ids"]), 2)
+            second_tree.scan = False
+            scan_authorized(conn, cfg)
+            event = conn.execute("SELECT payload_json FROM events WHERE kind='scan_success' ORDER BY rowid DESC LIMIT 1").fetchone()
+            proof = json.loads(event["payload_json"])
+            self.assertEqual(proof["scope_sha256"], scope_identity(project))
+            self.assertEqual([row["worktree_id"] for row in proof["observation_ids"]], ["t-main"])
+            second_tree.scan = True
+            self.assertNotEqual(proof["scope_sha256"], scope_identity(project))
 
     def test_denied_env_is_not_excerpted(self) -> None:
         root = self._tmp()
@@ -113,22 +230,18 @@ class CollectTests(unittest.TestCase):
     def test_default_projects_never_authorize_home_as_one_tree(self) -> None:
         from xiaomao.config import default_projects
 
-        projects = default_projects()
-        self.assertEqual(projects[0].project_id, "website")
+        root = self._tmp()
+        with patch("xiaomao.config._WS", str(root / "workspace")), patch("xiaomao.config._HOME", str(root)):
+            projects = default_projects()
         roots = {p.approved_root.rstrip("/") for p in projects}
-        self.assertNotIn("/Users/xiuqiu", roots)
+        self.assertNotIn(str(root), roots)
         ids = {p.project_id for p in projects}
+        self.assertNotIn("website", ids)
         self.assertIn("QAI", ids)
         self.assertIn("AI-Web3-Learning", ids)
         self.assertIn("Wallet-Infrastructure", ids)
-        website = projects[0]
-        by_id = {w.worktree_id: w for w in website.worktrees}
-        self.assertEqual(set(by_id), {"website-main"})
-        self.assertTrue(by_id["website-main"].scan)
-        self.assertIn("theAIapp-service-integration-keep", by_id["website-main"].path)
-        scannable = [w for p in projects for w in p.worktrees if w.scan]
-        self.assertGreaterEqual(len(scannable), 30)
-        self.assertTrue(all("/Documents/" not in w.path for w in scannable))
+        self.assertEqual(ids, {"QAI", "wallet-core", "xiaomao-Agent", "xiuqiu-site", "AI-Web3-Learning", "Wallet-Infrastructure"})
+        self.assertTrue(all(project_exclusion_reason(p) is None for p in projects))
 
     def test_scan_authorized_covers_every_fixture_project(self) -> None:
         root = self._tmp()
@@ -150,3 +263,106 @@ class CollectTests(unittest.TestCase):
         self.assertTrue(by_project["t"][0]["inserted"])
         self.assertTrue(by_project["u"][0]["inserted"])
         self.assertEqual(n, 2)
+
+    def test_saved_company_registration_cannot_reach_git_collector(self) -> None:
+        root = self._tmp()
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, root / "theAIapp-service-integration-keep")
+        save_config(cfg)
+        loaded = load_config(home)
+        with open_db(home / "xiaomao.sqlite") as conn, patch("xiaomao.collect.collect_snapshot") as collect:
+            result = scan_authorized(conn, loaded)
+            collect.assert_not_called()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0], 0)
+            run = conn.execute("SELECT outcome, last_safe_error FROM scan_runs").fetchone()
+            self.assertEqual(run["outcome"], "skip")
+            self.assertIn("company_project_excluded", run["last_safe_error"])
+            self.assertEqual(conn.execute("SELECT scan_enabled FROM worktrees").fetchone()[0], 0)
+        self.assertEqual(result[project.project_id][0]["status"], "excluded")
+        self.assertEqual(loaded.scannable_worktrees(), [])
+
+    def test_mixed_project_refuses_even_personal_tree_before_scan_helper(self) -> None:
+        root = self._tmp()
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, root / "personal")
+        project.worktrees.append(
+            WorktreeSpec("company", str(root / "event-services-chooseme-event"), scan=False)
+        )
+        with open_db(home / "xiaomao.sqlite") as conn, patch("xiaomao.collect.scan_worktree") as scan:
+            result = scan_authorized(conn, cfg)
+            scan.assert_not_called()
+        self.assertEqual(result[project.project_id][0]["status"], "excluded")
+
+    def test_saved_retired_or_third_party_registration_cannot_reach_git_collector(self) -> None:
+        for path in ("/Users/xiuqiu/WorkSpace/agent-accord", "/Users/xiuqiu/WorkSpace/stats"):
+            with self.subTest(path=path):
+                root = self._tmp()
+                cfg, project, _wt = _cfg(root / "home", Path(path))
+                save_config(cfg)
+                loaded = load_config(root / "home")
+                with open_db(root / "home" / "xiaomao.sqlite") as conn, patch("xiaomao.collect.collect_snapshot") as collect:
+                    result = scan_authorized(conn, loaded)
+                    collect.assert_not_called()
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0], 0)
+                self.assertEqual(loaded.project(project.project_id).approved_root, path)
+                self.assertEqual(result[project.project_id][0]["status"], "excluded")
+
+    def test_neutral_company_linked_worktree_cannot_reach_git_collector(self) -> None:
+        root = self._tmp()
+        company_fixture = init_repo(root / "theAIapp-service")
+        neutral_tree = root / "neutral-tree"
+        git(company_fixture, "worktree", "add", "-b", "neutral", str(neutral_tree))
+        cfg, project, _wt = _cfg(root / "home", neutral_tree)
+        with open_db(root / "home" / "xiaomao.sqlite") as conn, patch(
+            "xiaomao.collect.collect_snapshot", side_effect=AssertionError("Git collector must not run")
+        ) as collect:
+            result = scan_authorized(conn, cfg)
+            collect.assert_not_called()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0], 0)
+        self.assertEqual(result[project.project_id][0]["status"], "excluded")
+        self.assertIn("company_project_excluded", result[project.project_id][0]["reason"])
+
+    def test_archived_compatibility_link_cannot_reach_git_collector(self) -> None:
+        root = self._tmp()
+        archive = root / "_待删除旧项目_2026-09-22" / "old-repo"
+        archive.mkdir(parents=True)
+        compatibility_link = root / "old-repo"
+        compatibility_link.symlink_to(archive, target_is_directory=True)
+        cfg, project, _wt = _cfg(root / "home", compatibility_link)
+        with open_db(root / "home" / "xiaomao.sqlite") as conn, patch("xiaomao.collect.collect_snapshot") as collect:
+            result = scan_authorized(conn, cfg, project.project_id)
+            collect.assert_not_called()
+        self.assertEqual(result[project.project_id][0]["status"], "excluded")
+        self.assertIn("archived_project_excluded", result[project.project_id][0]["reason"])
+
+    def test_direct_scan_helper_refuses_excluded_argument(self) -> None:
+        root = self._tmp()
+        cfg, project, _wt = _cfg(root / "home", root / "personal")
+        company_wt = WorktreeSpec("other", str(root / "theAIapp-service-codex"))
+        with patch("xiaomao.collect.collect_snapshot") as collect:
+            result = scan_worktree(None, cfg, project, company_wt)
+            collect.assert_not_called()
+        self.assertEqual(result["status"], "excluded")
+
+    def test_explicit_empty_projects_never_scan_or_fallback(self) -> None:
+        root = self._tmp()
+        cfg, _project, _wt = _cfg(root / "home", root / "unused")
+        cfg.projects = []
+        save_config(cfg)
+        loaded = load_config(root / "home")
+        with patch("xiaomao.collect.scan_project") as scan:
+            self.assertEqual(scan_authorized(None, loaded), {})
+            scan.assert_not_called()
+        self.assertEqual(loaded.projects, [])
+
+    def test_project_with_no_enabled_worktrees_does_not_record_success(self) -> None:
+        root = self._tmp()
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, root / "unused", scan=False)
+        with open_db(home / "xiaomao.sqlite") as conn, patch("xiaomao.collect.collect_snapshot") as collect:
+            result = scan_authorized(conn, cfg)
+            collect.assert_not_called()
+            run = conn.execute("SELECT outcome, last_safe_error FROM scan_runs").fetchone()
+            self.assertEqual(run["outcome"], "skip")
+            self.assertEqual(run["last_safe_error"], "no_enabled_worktrees")
+        self.assertEqual(result[project.project_id], [])

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from xiaomao.scope import project_exclusion_reason
 from xiaomao.paths import (
     DEFAULT_EXTERNAL_DATA,
     DEFAULT_EXTERNAL_MOUNT,
@@ -76,6 +77,8 @@ class AppConfig:
         for p in self.projects:
             if project_id and p.project_id != project_id:
                 continue
+            if project_exclusion_reason(p):
+                continue
             for wt in p.worktrees:
                 if wt.scan:
                     out.append((p, wt))
@@ -120,67 +123,15 @@ def default_projects() -> list[ProjectSpec]:
     Library — it is never an approved_root. New checkouts stay unauthorized
     until they are added here.
     """
-    website_live = f"{_WS}/theAIapp-service-integration-keep"
-    projects = [
-        ProjectSpec(
-            project_id="website",
-            display_name="The AI 官网后端",
-            approved_root=website_live,
-            worktrees=[
-                WorktreeSpec(
-                    worktree_id="website-main",
-                    path=website_live,
-                    scan=True,
-                    notes="当前官网活树",
-                ),
-            ],
-        )
-    ]
+    projects: list[ProjectSpec] = []
     workspace = [
-        ("agent-accord", "agent-accord"),
-        ("agent-stablecoin-wallet", "agent-stablecoin-wallet"),
-        ("dolphinode", "dolphinode"),
-        ("event-watcher", "event-watcher"),
-        ("exchange-risk-service", "exchange-risk-service"),
-        ("exchange-wallet-api", "exchange-wallet-api"),
-        ("exchange-wallet-proto", "exchange-wallet-proto"),
-        ("exchange-wallet-service", "exchange-wallet-service"),
-        ("exchange-wallet-sign", "exchange-wallet-sign"),
         ("QAI", "QAI"),
-        ("Qiu-market", "Qiu-market"),
-        ("stableflow", "stableflow"),
-        ("stats", "stats"),
-        ("tss", "tss"),
-        ("wallet", "wallet"),
         ("wallet-core", "wallet-core"),
-        ("wallet-mpc-sign", "wallet-mpc-sign"),
-        ("wallet-reliability-lab", "wallet-reliability-lab"),
-        ("web3-wallet-engineer-lab", "web3-wallet-engineer-lab"),
         ("xiaomao-Agent", "xiaomao-Agent"),
-        ("xiuqiu-hermes-skills", "xiuqiu-hermes-skills"),
         ("xiuqiu-site", "xiuqiu-site"),
-        ("xiuqiu-token", "xiuqiu-token"),
     ]
-    linked_clean = {
-        "exchange-risk-service",
-        "exchange-wallet-api",
-        "exchange-wallet-proto",
-        "exchange-wallet-service",
-        "exchange-wallet-sign",
-        "tss",
-    }
     for project_id, display in workspace:
-        extras: list[WorktreeSpec] = []
-        if project_id in linked_clean:
-            extras.append(
-                WorktreeSpec(
-                    worktree_id=f"{project_id}-clean",
-                    path=f"{_WS}/{project_id}-clean",
-                    scan=True,
-                    notes="同仓附加工作树（WorkSpace 内，已授权）",
-                )
-            )
-        projects.append(_repo(project_id, display, f"{_WS}/{project_id}", extras=extras or None))
+        projects.append(_repo(project_id, display, f"{_WS}/{project_id}"))
     projects.extend(
         [
             _repo("AI-Web3-Learning", "AI-Web3-Learning", f"{_HOME}/AI-Web3-Learning"),
@@ -191,6 +142,12 @@ def default_projects() -> list[ProjectSpec]:
             ),
         ]
     )
+    for project in projects:
+        reason = project_exclusion_reason(project)
+        if reason:
+            for wt in project.worktrees:
+                wt.scan = False
+                wt.notes = reason
     return projects
 
 
@@ -267,7 +224,9 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
             volume_uuid=ext.get("volume_uuid"),
             volume_name=ext.get("volume_name"),
         ),
-        projects=projects or default_projects(),
+        # An explicit empty (or null) list revokes all registrations. Only a
+        # legacy config with no projects field receives the default allow-list.
+        projects=projects if "projects" in data else default_projects(),
         ollama_host=data.get("ollama_host") or "127.0.0.1:11434",
         ollama_no_cloud=bool(data.get("ollama_no_cloud", True)),
         context_length=int(data.get("context_length") or 8192),

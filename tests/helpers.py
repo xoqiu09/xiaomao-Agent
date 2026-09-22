@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from xiaomao.config import AppConfig, default_config
+from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec, default_config
 
 
 GIT_ENV = {
@@ -49,13 +49,15 @@ def website_fixture_config(home: Path, repo: Path, extra_root: Path | None = Non
     cfg = default_config(home)
     cfg.home = str(home)
     extra_root = extra_root or Path(repo).parent
-    website = cfg.projects[0]
-    website.approved_root = str(repo)
-    website.worktrees[0].path = str(repo)
-    website.worktrees[0].worktree_id = "website-main"
-    website.worktrees[0].scan = True
-    for extra in website.worktrees[1:]:
-        extra.path = str(extra_root / extra.worktree_id)
-        extra.scan = False
-    cfg.projects = [website]
+    cfg.projects = [
+        ProjectSpec(
+            project_id="website",
+            display_name="fixture",
+            approved_root=str(repo),
+            worktrees=[WorktreeSpec(worktree_id="website-main", path=str(repo))],
+        )
+    ]
+    cfg.external.mount = str(extra_root / "external")
+    cfg.external.models_dir = str(extra_root / "external" / "models")
+    cfg.external.data_dir = str(extra_root / "external" / "data")
     return cfg

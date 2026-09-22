@@ -1,108 +1,66 @@
 # 小猫 / xiaomao-agent
 
-Mac Studio 上长期运行的本地私有工程观察员。只读观察已授权的本地开发活动，把进度、风险和未知项写成日报与 Handoff。
+本机只读工程观察员：采集已登记个人项目的 Git 磁盘状态，生成日报与交接，并在 CLI / SwiftBar 里显示资料来源、时间和未核实项。采集不加载模型；模型只接收程序筛选的事实，没有 shell、Git 或数据库写入工具。
 
-持续工作的是采集程序；本地模型只在生成日报或交接材料时加载，失败则降级为规则报告。
+## 查看最新交接
 
-```text
-授权工作树 → 只读 Git 采集 → 路径/密钥过滤 → SQLite → 规则报告
-                         ↘ 日终/手动：可选本地模型（失败则降级）
-```
-
-## 运行
-
-默认 Python：`/Users/xiuqiu/.local/bin/python3.11`。数据目录默认 `~/Library/Application Support/Xiaomao/`。测试用 `--home` 覆盖。
+在本仓根目录运行（Python 3.11+，核心无第三方依赖）：
 
 ```bash
-export PYTHONPATH=/Users/xiuqiu/WorkSpace/xiaomao-Agent/src
-export XIAOMAO_HOME="$HOME/Library/Application Support/Xiaomao"
-
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" health
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" status --project website
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" latest daily
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" latest daily --print
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" open daily
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" handoff --project website
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" latest handoff --project website
+export PYTHONPATH="$PWD/src"
+python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 ```
 
-手动加载 30b（调度在无新磁盘证据时不会自动加载）：
+这条查询读取已有报告和所需的 SQLite 元数据，不扫描项目、不加载模型。它会显示生成时间、采集核对截止时间、观察 ID，以及测试 / 部署仍为 `unknown`。有多个项目时必须用 `--project` 选择；只有一个可读取项目时可省略。
+
+- 返回 `0`：资料可读且仍在 11 分钟时效内；不代表测试通过或已经上线。
+- 返回 `2`：没有交接文件。
+- 返回 `3`：陈旧、来源或范围变化、旧格式缺少校验、采集失败 / 缺失等未核实状态。
+- `open handoff --project ID` 也先校验；未核实时不会直接打开旧文件。
+
+需要更新资料时，明确执行采集和生成。两步都不调用模型：
 
 ```bash
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" daily --with-model
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" handoff --project website --with-model
+python3.11 -m xiaomao scan --project xiaomao-Agent
+python3.11 -m xiaomao handoff --project xiaomao-Agent
+python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 ```
 
-## 数据在哪
+报告 `.txt` 与同名 `.json` 保存正文哈希、生成时间、扫描范围和观察 ID。只改文件 mtime 不会刷新资料。重新启用或改指工作树后要重新扫描；单棵树的成功时间不能替另一棵树证明新鲜。旧报告和历史观察保留；旧格式先标未核实，不自动升级为通过。
 
-- 日报：`~/Library/Application Support/Xiaomao/reports/daily/`
-- 30b 日报副本（不被规则日报覆盖）：`~/Library/Application Support/Xiaomao/reports/daily/YYYY-MM-DD.model.txt`
-- Handoff：`~/Library/Application Support/Xiaomao/reports/handoff/`
-- 状态报告：`~/Library/Application Support/Xiaomao/reports/projects/`
-- 库：`~/Library/Application Support/Xiaomao/xiaomao.sqlite`
-- 扫描日志：`~/Library/Application Support/Xiaomao/logs/scan.{out,err}.log`
-- 日报日志：`~/Library/Application Support/Xiaomao/logs/daily.{out,err}.log`
-- SwiftBar 插件目录：`~/Library/Application Support/Xiaomao/swiftbar-plugins/`（只读入口，不扫描、不加载模型）
+## 范围与数据位置
 
-## 暂停 / 恢复
+正式数据在 `~/Library/Application Support/Xiaomao/`；全局 `--home PATH` 可覆盖。配置文件是 `config.json`，SQLite 为 `xiaomao.sqlite`，报告在 `reports/daily/`、`reports/handoff/`、`reports/projects/`。
+
+默认只保留既有六项登记：QAI、wallet-core、xiaomao-Agent、xiuqiu-site、AI-Web3-Learning、Wallet-Infrastructure。新树不会自动获得权限，`projects: []` 不会扩回默认清单。
+
+公司项目（包括 theAIapp-service 各树、event-services-chooseme-event）、已登记的退役路径、`_待删除旧项目_2026-09-22` 归档以及 Stats / AgentNotch / TokenMonitor 第三方工具不进入活动采集。兼容链接和 Git 的 `.git` / `commondir` 指针也受检查；只检查有限元数据，命中排除目标即停止。完全改名且没有可识别来源指针的独立克隆仍需要维护者明确识别并排除。
+
+历史日报可能包含后来撤销的项目。`latest` / `open` 只接受与当前范围匹配、正文哈希有效的日报 / 状态文件；旧文件保留但不提供绕过校验的快捷入口。
+
+## SwiftBar
+
+插件为 `scripts/swiftbar/xiaomao.1m.sh`，每分钟刷新。按当前可读取个人项目显示扫描与交接状态，提供“查看交接与未核实项”按钮，在终端执行同一只读 CLI。按钮重新校验资料，刷新本身不采集、不加载模型。
+
+插件解析自己的真实路径，因此可以从隔离源码树运行。现用安装及源码身份见 [EXECUTION_STATE.md](EXECUTION_STATE.md)。已有 SwiftBar 不需要重新安装应用；切换插件软链接和调度脚本前先备份当前指向与 plist。
+
+SQLite 使用 `mode=ro` / `query_only` 读取，不修改应用记录或报告。SQLite 可能创建自己的 WAL / SHM 协调文件；这不等于数据目录零文件变化。
+
+## 调度、模型与 Pilot
+
+- `ai.xiaomao.scan`：300 秒一次，扫描当前登记范围，完全不加载模型；任何树失败、排除、暂停或没有实际结果，CLI 都不报整体成功。
+- `ai.xiaomao.daily`：本机时区 21:30，`daily --scheduled`，仅有合适的新证据时尝试本地解读。
+- 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载新模型。
+- `pause infer` / `resume infer`：控制推理；`pause scan` / `resume scan`：控制本系统任务。Pilot 起算和历史记录保留。
+
+状态仍是 **PILOT_RUNNING**，不是 STABILITY_PASSED。CLI 回归、菜单运行、一次真实扫描都不能代替多日稳定性证据。
+
+## 开发与验收
 
 ```bash
-# 只停推理：扫描继续，不加载模型
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" pause infer
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" resume infer
-
-# 停本系统定时任务（scan + daily LaunchAgent，不删 plist）
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" pause scan
-python3.11 -m xiaomao --home "$XIAOMAO_HOME" resume scan
+PYTHONPATH=src python3.11 scripts/accept.py --isolated
 ```
 
-停 Ollama：`/bin/sh scripts/user_stop_ollama.sh`  
-启动 Ollama：`/bin/sh scripts/user_serve_ollama.sh`
+该入口默认就使用临时 HOME、临时数据目录和真实临时 Git worktree；包含全套 unittest、两次扫描幂等、业务文件 / index / hooks 不变、日报、交接查询和本仓 worktree 身份。退出 `0` 仅表示六个隔离门通过；正式 home 与外盘身份两门明确 `NOT_RUN`，`full_live_acceptance=false`。
 
-本机 30b 对话（不是小猫 CLI；与 `hermes` / `claude` 一样打命令名）：
-
-```bash
-qwen3
-```
-
-退出：`/bye`。同时只加载 1 个模型；聊天时不要再跑 `xiaomao daily --with-model`。
-
-## SwiftBar 菜单栏入口
-
-只读显示扫描结果、过期状态，并打开已有日报 / Handoff / 报告文件夹。刷新不跑 `scan`、不加载模型、不改自动修复权限。成功扫描超过约 11 分钟未更新时，菜单栏显示「信息已过期」，不挂假绿灯。
-
-```bash
-/bin/sh /Users/xiuqiu/WorkSpace/xiaomao-Agent/scripts/install-swiftbar.sh
-```
-
-插件源文件：`scripts/swiftbar/xiaomao.1m.sh`（每分钟刷新）。第一次安装后可在 SwiftBar → Settings 勾选 Launch at Login。
-
-## 调度
-
-- `ai.xiaomao.scan`：每 5 分钟只跑 `scan`（全部已授权项目，不加载模型）。已装，不要再装一份。
-- `ai.xiaomao.daily`：本机时区 **21:30** 跑 `daily --scheduled`。无新磁盘证据不加载模型，只写短规则日报。
-
-```bash
-python3.11 -m xiaomao schedule status
-python3.11 -m xiaomao schedule status-daily
-```
-
-## 验收
-
-```bash
-PYTHONPATH=src python3.11 -m unittest discover -s tests -v
-PYTHONPATH=src python3.11 scripts/accept.py
-```
-
-## 约束
-
-- 采集与推理解耦；事实、解读、建议、未知分栏
-- 无证据 = unknown；旧测试报告不能升级为当前通过
-- 模型没有 shell、不能写 Git / 数据库
-- 外盘不在或身份不符时不把模型改下到 `~/.ollama/models`
-- 新工作树只列为候选，不自动授权
-- 不把 `/Users/xiuqiu` 当一棵仓扫（不是 git 仓库，含 `.ssh` / 凭证 / Library）；授权的是家目录下已点名的健康 git 工作树
-- 默认深度 **qwen3-coder:30b**；`gemma4:12b` 与 `qwen3.6:35b` 保留，不自动调用、不重测、不删除
-- KEEP_ALIVE=0 不改；扫描路径不加载模型
-- 无变化写「授权观察范围内无新变化」，不写「用户今天没有工作」
-- 当前状态是 **PILOT_RUNNING**，不是 STABILITY_PASSED
+目录与真实调用链见 [ARCHITECTURE.md](ARCHITECTURE.md)，修改及验证步骤见 [CONTRIBUTING.md](CONTRIBUTING.md)。

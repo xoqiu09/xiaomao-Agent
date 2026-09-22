@@ -378,7 +378,7 @@ def latest_observation(conn: sqlite3.Connection, worktree_id: str) -> sqlite3.Ro
         """
         SELECT * FROM observations
         WHERE worktree_id = ?
-        ORDER BY observed_at_utc DESC
+        ORDER BY observed_at_utc DESC, rowid DESC
         LIMIT 1
         """,
         (worktree_id,),
@@ -452,7 +452,14 @@ def record_discovered_worktree(
     )
 
 
-def latest_by_project(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.Row]:
+def latest_by_project(conn: sqlite3.Connection, project_id: str, worktree_ids: list[str] | None = None) -> list[sqlite3.Row]:
+    if worktree_ids == []:
+        return []
+    restriction = ""
+    args = [project_id]
+    if worktree_ids is not None:
+        restriction = " AND w.worktree_id IN (" + ",".join("?" for _ in worktree_ids) + ")"
+        args.extend(worktree_ids)
     return list(
         conn.execute(
             """
@@ -478,13 +485,13 @@ def latest_by_project(conn: sqlite3.Connection, project_id: str) -> list[sqlite3
             JOIN projects p ON p.project_id = w.project_id
             LEFT JOIN observations o ON o.observation_id = (
               SELECT observation_id FROM observations
-              WHERE worktree_id = w.worktree_id
-              ORDER BY observed_at_utc DESC LIMIT 1
+              WHERE worktree_id = w.worktree_id AND project_id = w.project_id
+              ORDER BY observed_at_utc DESC, rowid DESC LIMIT 1
             )
             WHERE w.project_id = ?
             ORDER BY w.worktree_id
-            """,
-            (project_id,),
+            """.replace("WHERE w.project_id = ?", "WHERE w.project_id = ?" + restriction),
+            args,
         ).fetchall()
     )
 
