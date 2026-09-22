@@ -7,8 +7,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from xiaomao.cli import main
-from xiaomao.config import default_config, save_config
-from tests.helpers import init_repo
+from xiaomao.config import save_config
+from tests.helpers import init_repo, website_fixture_config
 
 
 class CliTests(unittest.TestCase):
@@ -16,14 +16,7 @@ class CliTests(unittest.TestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         repo = init_repo(root / "repo")
         home = root / "home"
-        cfg = default_config(home)
-        cfg.home = str(home)
-        cfg.projects[0].approved_root = str(repo)
-        cfg.projects[0].worktrees[0].path = str(repo)
-        cfg.projects[0].worktrees[0].worktree_id = "website-main"
-        for extra in cfg.projects[0].worktrees[1:]:
-            extra.path = str(root / extra.worktree_id)
-            extra.scan = False
+        cfg = website_fixture_config(home, repo, extra_root=root)
         home.mkdir(parents=True)
         save_config(cfg)
 

@@ -42,6 +42,7 @@ python3.11 -m xiaomao --home "$XIAOMAO_HOME" handoff --project website --with-mo
 - 库：`~/Library/Application Support/Xiaomao/xiaomao.sqlite`
 - 扫描日志：`~/Library/Application Support/Xiaomao/logs/scan.{out,err}.log`
 - 日报日志：`~/Library/Application Support/Xiaomao/logs/daily.{out,err}.log`
+- SwiftBar 插件目录：`~/Library/Application Support/Xiaomao/swiftbar-plugins/`（只读入口，不扫描、不加载模型）
 
 ## 暂停 / 恢复
 
@@ -66,9 +67,19 @@ qwen3
 
 退出：`/bye`。同时只加载 1 个模型；聊天时不要再跑 `xiaomao daily --with-model`。
 
+## SwiftBar 菜单栏入口
+
+只读显示扫描结果、过期状态，并打开已有日报 / Handoff / 报告文件夹。刷新不跑 `scan`、不加载模型、不改自动修复权限。成功扫描超过约 11 分钟未更新时，菜单栏显示「信息已过期」，不挂假绿灯。
+
+```bash
+/bin/sh /Users/xiuqiu/WorkSpace/xiaomao-Agent/scripts/install-swiftbar.sh
+```
+
+插件源文件：`scripts/swiftbar/xiaomao.1m.sh`（每分钟刷新）。第一次安装后可在 SwiftBar → Settings 勾选 Launch at Login。
+
 ## 调度
 
-- `ai.xiaomao.scan`：每 5 分钟只跑 `scan`（不加载模型）。已装，不要再装一份。
+- `ai.xiaomao.scan`：每 5 分钟只跑 `scan`（全部已授权项目，不加载模型）。已装，不要再装一份。
 - `ai.xiaomao.daily`：本机时区 **21:30** 跑 `daily --scheduled`。无新磁盘证据不加载模型，只写短规则日报。
 
 ```bash
@@ -90,6 +101,7 @@ PYTHONPATH=src python3.11 scripts/accept.py
 - 模型没有 shell、不能写 Git / 数据库
 - 外盘不在或身份不符时不把模型改下到 `~/.ollama/models`
 - 新工作树只列为候选，不自动授权
+- 不把 `/Users/xiuqiu` 当一棵仓扫（不是 git 仓库，含 `.ssh` / 凭证 / Library）；授权的是家目录下已点名的健康 git 工作树
 - 默认深度 **qwen3-coder:30b**；`gemma4:12b` 与 `qwen3.6:35b` 保留，不自动调用、不重测、不删除
 - KEEP_ALIVE=0 不改；扫描路径不加载模型
 - 无变化写「授权观察范围内无新变化」，不写「用户今天没有工作」

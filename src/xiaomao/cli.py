@@ -10,7 +10,7 @@ from pathlib import Path
 
 from xiaomao import __version__
 from xiaomao.config import VolumeIdentityError, load_config, save_config
-from xiaomao.collect import register_project, scan_project
+from xiaomao.collect import register_project, scan_authorized
 from xiaomao.doctor import collect_doctor, format_doctor
 from xiaomao.paths import default_home, ensure_layout, layout
 from xiaomao.render import default_report_path, status_text, write_project_report
@@ -74,24 +74,28 @@ def cmd_scan(ns: argparse.Namespace) -> int:
     cfg.home = str(home)
     save_config(cfg)
     dest = None
+    project_id = ns.project
     try:
         with ScanLock(layout(home)["lock"]), open_db(layout(home)["db"]) as conn:
-            results = scan_project(conn, cfg, ns.project)
+            by_project = scan_authorized(conn, cfg, project_id)
             if ns.write_report:
-                rows = latest_by_project(conn, ns.project)
+                if not project_id:
+                    raise RuntimeError("--write-report 需要 --project")
+                rows = latest_by_project(conn, project_id)
                 dest = write_project_report(
-                    cfg, cfg.project(ns.project), rows, default_report_path(cfg, ns.project)
+                    cfg, cfg.project(project_id), rows, default_report_path(cfg, project_id)
                 )
     except RuntimeError as exc:
         if "another xiaomao scan holds" not in str(exc):
             raise
+        skip_project = project_id or (cfg.projects[0].project_id if cfg.projects else "website")
         try:
             with open_db(layout(home)["db"]) as conn:
                 insert_scan_run(
                     conn,
                     {
                         "run_id": f"run_{uuid.uuid4().hex[:16]}",
-                        "project_id": ns.project,
+                        "project_id": skip_project,
                         "started_at": utc_now(),
                         "finished_at": utc_now(),
                         "outcome": "skip",
@@ -105,14 +109,14 @@ def cmd_scan(ns: argparse.Namespace) -> int:
                 insert_event(
                     conn,
                     kind="scan_skip",
-                    project_id=ns.project,
+                    project_id=skip_project,
                     payload={"reason": "lock_busy"},
                 )
         except Exception:
             pass
         json.dump(
             {
-                "project": ns.project,
+                "project": project_id,
                 "results": [],
                 "report": None,
                 "outcome": "skip",
@@ -124,12 +128,15 @@ def cmd_scan(ns: argparse.Namespace) -> int:
         )
         sys.stdout.write("\n")
         return 0
-    json.dump(
-        {"project": ns.project, "results": results, "report": str(dest) if dest else None},
-        sys.stdout,
-        ensure_ascii=False,
-        indent=2,
-    )
+    if project_id:
+        payload = {
+            "project": project_id,
+            "results": by_project.get(project_id, []),
+            "report": str(dest) if dest else None,
+        }
+    else:
+        payload = {"projects": by_project, "report": str(dest) if dest else None}
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
 
@@ -459,7 +466,7 @@ def cmd_health(ns: argparse.Namespace) -> int:
         sys.stdout.write("\n".join(lines) + "\n")
         return 2
     with open_db(db) as conn:
-        last = last_scan_success(conn, "website")
+        last = last_scan_success(conn)
         lines.append(f"最近一次扫描成功：{last['finished_at'] if last else '尚无'}")
         lines.append(f"推理暂停：{'是' if infer_paused(conn) else '否'}")
         lines.append(f"扫描暂停：{'是' if scan_paused(conn) else '否'}")
@@ -535,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     i.set_defaults(func=cmd_init)
 
     s = sub.add_parser("scan", help="只读扫描已授权且 scan=true 的工作树")
-    s.add_argument("--project", required=True)
+    s.add_argument("--project", default=None, help="省略则扫描全部已授权项目")
     s.add_argument("--write-report", action="store_true")
     s.set_defaults(func=cmd_scan)
 

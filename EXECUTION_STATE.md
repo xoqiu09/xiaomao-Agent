@@ -1,6 +1,6 @@
 # EXECUTION_STATE.md
 
-更新时间：2026-09-21
+更新时间：2026-09-22
 状态：**PILOT_RUNNING（不是 STABILITY_PASSED）**
 
 本文件是唯一交接状态记录。不要另开平行交接文档。
@@ -16,12 +16,12 @@ Xiaomao 是部署在 Mac Studio 上、长期运行的本地私有工程观察 Ag
 - 实现基线：`06e8b7e`（单工作树试运行）
 - 形式运行时：`~/Library/Application Support/Xiaomao/`
 - schema：2（`scan_runs` / `events`）
-- 观察范围：仅 **website-main** 扫描。website-auth / website-integration 登记不扫。publish 未授权。
-- 业务仓 HEAD（只读）：`1dae06ad7436`（`feat/website-backend-v0.1`）
+- 观察范围：家目录下已点名的健康 git 工作树（WorkSpace + `~/AI-Web3-Learning` + `~/Wallet-Infrastructure`）。**不是**把 `/Users/xiuqiu` 当一棵仓。website-main 指向 `theAIapp-service-integration-keep`。空壳 `theAIapp-service` 与不存在的 auth/integration 路径已从登记拿掉。Codex/`Documents` 附加树只列为候选。
+- 业务仓 HEAD（只读，website-main）：见最近一次扫描观察。
 
 ## 调度
 
-- `ai.xiaomao.scan`：plist `~/Library/LaunchAgents/ai.xiaomao.scan.plist`，mtime 2026-09-20 10:42，**未重写**。interval 300s。
+- `ai.xiaomao.scan`：plist `~/Library/LaunchAgents/ai.xiaomao.scan.plist`，interval 300s。`scripts/xiaomao-scan.sh` 忽略遗留 project 参数，扫描全部已授权项目。
 - `ai.xiaomao.daily`：plist `~/Library/LaunchAgents/ai.xiaomao.daily.plist`，本机时区 21:30。`scripts/xiaomao-daily.sh` → `daily --scheduled`。无新证据不加载 30b。
 
 ## 命令
@@ -42,7 +42,8 @@ python3.11 -m xiaomao --home "$XIAOMAO_HOME" pause scan
 
 日报：`~/Library/Application Support/Xiaomao/reports/daily/`  
 30b 副本：同目录 `YYYY-MM-DD.model.txt`  
-Handoff：`~/Library/Application Support/Xiaomao/reports/handoff/`
+Handoff：`~/Library/Application Support/Xiaomao/reports/handoff/`  
+SwiftBar 只读入口：`scripts/install-swiftbar.sh` → 插件 `scripts/swiftbar/xiaomao.1m.sh`。不扫描、不加载模型。过期显示「信息已过期」。
 
 ## 试运行窗口
 
@@ -63,7 +64,7 @@ Handoff：`~/Library/Application Support/Xiaomao/reports/handoff/`
 ## 不声称
 
 - **不是 STABILITY_PASSED。**
-- 不接第二棵工作树、QAI、远程测试/部署、Web UI、MCP、聊天界面。
+- 不接远程测试/部署、Web UI、MCP、聊天界面。QAI 等本机仓仅只读观察，不自动修复。
 - 不下载新模型。不重测 35b。
 - 采集缺口（睡眠/关机/登出）会记 gap；缺口内未落盘编辑不可见，不编造。
 

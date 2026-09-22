@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from xiaomao.config import AppConfig, ProjectSpec, WorktreeSpec, default_config
-from xiaomao.collect import register_project, scan_worktree
+from xiaomao.collect import register_project, scan_authorized, scan_worktree
 from xiaomao.policy import looks_like_secret, path_is_denied, redact_text, safe_excerpt_from_bytes
 from xiaomao.store import evidence_for_observation, open_db
 from tests.helpers import git, init_repo
@@ -59,6 +59,8 @@ class CollectTests(unittest.TestCase):
                 (result["observation_id"],),
             ).fetchone()["facts_json"]
         self.assertTrue(path_is_denied(".env"))
+        self.assertTrue(path_is_denied(".git-credentials"))
+        self.assertTrue(path_is_denied(".ssh/id_ed25519"))
         self.assertTrue(any(row["evidence_kind"] == "denied_path" for row in ev))
         self.assertTrue(all("super-secret" not in (row["safe_excerpt"] or "") for row in ev))
         self.assertNotIn("super-secret-value", facts)
@@ -107,3 +109,44 @@ class CollectTests(unittest.TestCase):
         self.assertIsNone(excerpt)
         self.assertEqual(status, "secret")
         self.assertNotIn("PRIVATE", redact_text("-----BEGIN RSA PRIVATE KEY-----"))
+
+    def test_default_projects_never_authorize_home_as_one_tree(self) -> None:
+        from xiaomao.config import default_projects
+
+        projects = default_projects()
+        self.assertEqual(projects[0].project_id, "website")
+        roots = {p.approved_root.rstrip("/") for p in projects}
+        self.assertNotIn("/Users/xiuqiu", roots)
+        ids = {p.project_id for p in projects}
+        self.assertIn("QAI", ids)
+        self.assertIn("AI-Web3-Learning", ids)
+        self.assertIn("Wallet-Infrastructure", ids)
+        website = projects[0]
+        by_id = {w.worktree_id: w for w in website.worktrees}
+        self.assertEqual(set(by_id), {"website-main"})
+        self.assertTrue(by_id["website-main"].scan)
+        self.assertIn("theAIapp-service-integration-keep", by_id["website-main"].path)
+        scannable = [w for p in projects for w in p.worktrees if w.scan]
+        self.assertGreaterEqual(len(scannable), 30)
+        self.assertTrue(all("/Documents/" not in w.path for w in scannable))
+
+    def test_scan_authorized_covers_every_fixture_project(self) -> None:
+        root = self._tmp()
+        repo_a = init_repo(root / "a")
+        repo_b = init_repo(root / "b")
+        home = root / "home"
+        cfg, project_a, _wt = _cfg(home, repo_a)
+        project_b = ProjectSpec(
+            project_id="u",
+            display_name="other",
+            approved_root=str(repo_b),
+            worktrees=[WorktreeSpec(worktree_id="u-main", path=str(repo_b), scan=True)],
+        )
+        cfg.projects = [project_a, project_b]
+        with open_db(home / "xiaomao.sqlite") as conn:
+            by_project = scan_authorized(conn, cfg)
+            n = conn.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
+        self.assertEqual(set(by_project), {"t", "u"})
+        self.assertTrue(by_project["t"][0]["inserted"])
+        self.assertTrue(by_project["u"][0]["inserted"])
+        self.assertEqual(n, 2)

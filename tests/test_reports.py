@@ -17,7 +17,7 @@ from xiaomao.migrate import backup_sqlite, migrate_models_dir
 from xiaomao.schedule import START_INTERVAL_SECONDS, plist_payload
 from xiaomao.store import open_db
 from xiaomao.summarize import degrade_note, summarize_or_degrade, validate_model_json
-from tests.helpers import init_repo, git
+from tests.helpers import init_repo, git, website_fixture_config
 
 
 class ReportCliTests(unittest.TestCase):
@@ -25,13 +25,7 @@ class ReportCliTests(unittest.TestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         repo = init_repo(root / "repo")
         home = root / "home"
-        cfg = default_config(home)
-        cfg.home = str(home)
-        cfg.projects[0].approved_root = str(repo)
-        cfg.projects[0].worktrees[0].path = str(repo)
-        for extra in cfg.projects[0].worktrees[1:]:
-            extra.path = str(root / extra.worktree_id)
-            extra.scan = False
+        cfg = website_fixture_config(home, repo, extra_root=root)
         home.mkdir(parents=True)
         save_config(cfg)
         buf = io.StringIO()
@@ -253,11 +247,12 @@ class MigrateLockScheduleTests(unittest.TestCase):
         self.assertNotIn("with-model", joined)
         script = Path(__file__).resolve().parents[1] / "scripts" / "xiaomao-scan.sh"
         text = script.read_text(encoding="utf-8")
-        self.assertIn("scan --project", text)
+        self.assertIn(" scan", text)
         self.assertNotIn("with-model", text)
         self.assertNotIn("daily", text)
         exec_line = [ln for ln in text.splitlines() if ln.startswith("exec ")][-1]
-        self.assertIn("scan --project", exec_line)
+        self.assertIn(" scan", exec_line)
+        self.assertNotIn("--project", exec_line)
         self.assertNotIn("eval", exec_line)
 
     def test_daily_plist_is_2130_and_separate_from_scan(self) -> None:
@@ -280,13 +275,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         home = Path(self.enterContext(tempfile.TemporaryDirectory())) / "h"
         root = home.parent
         repo = init_repo(root / "repo")
-        cfg = default_config(home)
-        cfg.home = str(home)
-        cfg.projects[0].approved_root = str(repo)
-        cfg.projects[0].worktrees[0].path = str(repo)
-        for extra in cfg.projects[0].worktrees[1:]:
-            extra.path = str(root / extra.worktree_id)
-            extra.scan = False
+        cfg = website_fixture_config(home, repo, extra_root=root)
         home.mkdir()
         save_config(cfg)
         self.assertEqual(main(["--home", str(home), "init"]), 0)
@@ -378,13 +367,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         index = gitdir / "index"
         index_mtime = index.stat().st_mtime_ns
         home = root / "home"
-        cfg = default_config(home)
-        cfg.home = str(home)
-        cfg.projects[0].approved_root = str(repo)
-        cfg.projects[0].worktrees[0].path = str(repo)
-        for extra in cfg.projects[0].worktrees[1:]:
-            extra.path = str(root / extra.worktree_id)
-            extra.scan = False
+        cfg = website_fixture_config(home, repo, extra_root=root)
         home.mkdir()
         save_config(cfg)
         self.assertEqual(main(["--home", str(home), "init"]), 0)
@@ -405,13 +388,7 @@ class GitReadonlyBusinessContractTests(unittest.TestCase):
         index = repo / ".git" / "index"
         before = index.stat().st_mtime_ns
         home = root / "home"
-        cfg = default_config(home)
-        cfg.home = str(home)
-        cfg.projects[0].approved_root = str(repo)
-        cfg.projects[0].worktrees[0].path = str(repo)
-        for extra in cfg.projects[0].worktrees[1:]:
-            extra.path = str(root / extra.worktree_id)
-            extra.scan = False
+        cfg = website_fixture_config(home, repo, extra_root=root)
         home.mkdir()
         save_config(cfg)
         self.assertEqual(main(["--home", str(home), "init"]), 0)

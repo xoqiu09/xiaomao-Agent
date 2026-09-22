@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 DEFAULT_HOME = Path.home() / "Library" / "Application Support" / "Xiaomao"
-WEBSITE = Path("/Users/xiuqiu/WorkSpace/theAIapp-service")
+WEBSITE = Path("/Users/xiuqiu/WorkSpace/theAIapp-service-integration-keep")
 
 
 def run(argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

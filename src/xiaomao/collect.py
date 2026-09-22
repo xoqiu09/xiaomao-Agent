@@ -357,6 +357,13 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
     return results
 
 
+def scan_authorized(conn, cfg: AppConfig, project_id: str | None = None) -> dict[str, list[dict]]:
+    """Scan one project, or every project in the allow-list."""
+    if project_id:
+        return {project_id: scan_project(conn, cfg, project_id)}
+    return {project.project_id: scan_project(conn, cfg, project.project_id) for project in cfg.projects}
+
+
 def observation_bundle(conn, observation_id: str) -> dict:
     row = conn.execute(
         "SELECT * FROM observations WHERE observation_id = ?",

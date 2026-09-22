@@ -82,35 +82,116 @@ class AppConfig:
         return out
 
 
+# Explicit allow-list. Never treat /Users/xiuqiu as one worktree, never auto-add
+# newly discovered trees (including Codex extras under ~/Documents).
+_WS = "/Users/xiuqiu/WorkSpace"
+_HOME = "/Users/xiuqiu"
+
+
+def _repo(
+    project_id: str,
+    display_name: str,
+    path: str,
+    *,
+    extras: list[WorktreeSpec] | None = None,
+) -> ProjectSpec:
+    trees = [
+        WorktreeSpec(
+            worktree_id=f"{project_id}-main",
+            path=path,
+            scan=True,
+            notes="",
+        )
+    ]
+    if extras:
+        trees.extend(extras)
+    return ProjectSpec(
+        project_id=project_id,
+        display_name=display_name,
+        approved_root=path,
+        worktrees=trees,
+    )
+
+
 def default_projects() -> list[ProjectSpec]:
-    root = "/Users/xiuqiu/WorkSpace/theAIapp-service"
-    return [
+    """Authorized git worktrees under the user home.
+
+    /Users/xiuqiu itself is not a git repo and contains .ssh / credentials /
+    Library — it is never an approved_root. New checkouts stay unauthorized
+    until they are added here.
+    """
+    website_live = f"{_WS}/theAIapp-service-integration-keep"
+    projects = [
         ProjectSpec(
             project_id="website",
             display_name="The AI 官网后端",
-            approved_root=root,
+            approved_root=website_live,
             worktrees=[
                 WorktreeSpec(
                     worktree_id="website-main",
-                    path=root,
+                    path=website_live,
                     scan=True,
-                    notes="主工作树 feat/website-backend-v0.1",
-                ),
-                WorktreeSpec(
-                    worktree_id="website-auth",
-                    path="/Users/xiuqiu/WorkSpace/theAIapp-service-auth-publishing",
-                    scan=False,
-                    notes="登记但不扫描",
-                ),
-                WorktreeSpec(
-                    worktree_id="website-integration",
-                    path="/Users/xiuqiu/WorkSpace/theAIapp-service-integration",
-                    scan=False,
-                    notes="登记但不扫描；有未提交改动",
+                    notes="当前官网活树",
                 ),
             ],
         )
     ]
+    workspace = [
+        ("agent-accord", "agent-accord"),
+        ("agent-stablecoin-wallet", "agent-stablecoin-wallet"),
+        ("dolphinode", "dolphinode"),
+        ("event-watcher", "event-watcher"),
+        ("exchange-risk-service", "exchange-risk-service"),
+        ("exchange-wallet-api", "exchange-wallet-api"),
+        ("exchange-wallet-proto", "exchange-wallet-proto"),
+        ("exchange-wallet-service", "exchange-wallet-service"),
+        ("exchange-wallet-sign", "exchange-wallet-sign"),
+        ("QAI", "QAI"),
+        ("Qiu-market", "Qiu-market"),
+        ("stableflow", "stableflow"),
+        ("stats", "stats"),
+        ("tss", "tss"),
+        ("wallet", "wallet"),
+        ("wallet-core", "wallet-core"),
+        ("wallet-mpc-sign", "wallet-mpc-sign"),
+        ("wallet-reliability-lab", "wallet-reliability-lab"),
+        ("web3-wallet-engineer-lab", "web3-wallet-engineer-lab"),
+        ("xiaomao-Agent", "xiaomao-Agent"),
+        ("xiuqiu-hermes-skills", "xiuqiu-hermes-skills"),
+        ("xiuqiu-site", "xiuqiu-site"),
+        ("xiuqiu-token", "xiuqiu-token"),
+    ]
+    linked_clean = {
+        "exchange-risk-service",
+        "exchange-wallet-api",
+        "exchange-wallet-proto",
+        "exchange-wallet-service",
+        "exchange-wallet-sign",
+        "tss",
+    }
+    for project_id, display in workspace:
+        extras: list[WorktreeSpec] = []
+        if project_id in linked_clean:
+            extras.append(
+                WorktreeSpec(
+                    worktree_id=f"{project_id}-clean",
+                    path=f"{_WS}/{project_id}-clean",
+                    scan=True,
+                    notes="同仓附加工作树（WorkSpace 内，已授权）",
+                )
+            )
+        projects.append(_repo(project_id, display, f"{_WS}/{project_id}", extras=extras or None))
+    projects.extend(
+        [
+            _repo("AI-Web3-Learning", "AI-Web3-Learning", f"{_HOME}/AI-Web3-Learning"),
+            _repo(
+                "Wallet-Infrastructure",
+                "Wallet-Infrastructure",
+                f"{_HOME}/Wallet-Infrastructure",
+            ),
+        ]
+    )
+    return projects
 
 
 def _as_dict(cfg: AppConfig) -> dict[str, Any]:

@@ -23,6 +23,7 @@ DENIED_BASENAMES = {
     "service-account.json",
     "authorized_keys",
     "known_hosts",
+    ".git-credentials",
 }
 
 DENIED_SUFFIXES = (
