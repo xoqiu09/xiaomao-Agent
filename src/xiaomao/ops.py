@@ -30,6 +30,8 @@ SCAN_INTERVAL_S = 300
 GAP_WARN_AFTER_S = SCAN_INTERVAL_S * 2 + 60  # two missed 5-minute ticks
 PILOT_DAYS = 7
 PILOT_MID_DAYS = 3
+# Closed without a stability verdict (e.g. observation scope was insufficient).
+PILOT_ARCHIVED = "PILOT_ARCHIVED"
 
 
 def _tz(cfg: AppConfig):
@@ -88,8 +90,13 @@ def resume_scan_flag(conn) -> None:
 
 def mark_pilot_running(conn, *, started_at: str | None = None) -> dict[str, str]:
     started = started_at or utc_now()
+    # An archived round never lends its start date to the next one; its
+    # metadata lives on in the pilot_archived event payload.
+    restarting = get_meta(conn, "pilot_status") == PILOT_ARCHIVED
     set_meta(conn, "pilot_status", "PILOT_RUNNING")
-    existing = get_meta(conn, "pilot_started_at")
+    existing = None if restarting else get_meta(conn, "pilot_started_at")
+    if restarting:
+        conn.execute("DELETE FROM meta WHERE key = 'pilot_archived_at'")
     if not existing:
         set_meta(conn, "pilot_started_at", started)
         started_use = started
@@ -110,12 +117,67 @@ def mark_pilot_running(conn, *, started_at: str | None = None) -> dict[str, str]
     return {"started_at": started_use, "mid_date": mid, "end_date": end, "status": "PILOT_RUNNING"}
 
 
+def pilot_window_stats(conn, started_at: str, until: str) -> dict[str, Any]:
+    """Program counts for one pilot round, both ends inclusive (timestamps are
+    whole seconds). Not a verdict — the caller states that."""
+    outcomes = {
+        row["outcome"]: row["n"]
+        for row in conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM scan_runs"
+            " WHERE started_at >= ? AND started_at <= ? GROUP BY outcome",
+            (started_at, until),
+        )
+    }
+    gaps = conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'collection_gap' AND at_utc >= ? AND at_utc <= ?",
+        (started_at, until),
+    ).fetchone()["n"]
+    observations = conn.execute(
+        "SELECT COUNT(*) AS n FROM observations WHERE observed_at_utc >= ? AND observed_at_utc <= ?",
+        (started_at, until),
+    ).fetchone()["n"]
+    return {
+        "window": [started_at, until],
+        "scan_outcomes": outcomes,
+        "collection_gaps": gaps,
+        "new_observations": observations,
+    }
+
+
+def archive_pilot(conn, *, reason: str, archived_at: str | None = None) -> dict[str, Any]:
+    """Close the running round without a pass/fail claim.
+
+    The round's meta and window counts go into a `pilot_archived` event so the
+    record survives the next `pilot start`. Scan history is never touched.
+    """
+    status = get_meta(conn, "pilot_status")
+    if status != "PILOT_RUNNING":
+        raise ValueError(f"没有进行中的 Pilot（当前状态：{status or '未开始'}）")
+    if not reason.strip():
+        raise ValueError("归档必须写明原因")
+    when = archived_at or utc_now()
+    started = get_meta(conn, "pilot_started_at") or when
+    payload = {
+        "reason": reason.strip(),
+        "started_at": started,
+        "mid_date": get_meta(conn, "pilot_mid_date"),
+        "end_date": get_meta(conn, "pilot_end_date"),
+        "archived_at": when,
+        "stats": pilot_window_stats(conn, started, when),
+    }
+    set_meta(conn, "pilot_status", PILOT_ARCHIVED)
+    set_meta(conn, "pilot_archived_at", when)
+    insert_event(conn, kind="pilot_archived", payload=payload)
+    return {"status": PILOT_ARCHIVED, **payload}
+
+
 def pilot_info(conn) -> dict[str, str | None]:
     return {
         "status": get_meta(conn, "pilot_status"),
         "started_at": get_meta(conn, "pilot_started_at"),
         "mid_date": get_meta(conn, "pilot_mid_date"),
         "end_date": get_meta(conn, "pilot_end_date"),
+        "archived_at": get_meta(conn, "pilot_archived_at"),
         "infer_paused": "1" if infer_paused(conn) else "0",
         "scan_paused": "1" if scan_paused(conn) else "0",
     }

@@ -59,12 +59,13 @@ SQLite 使用 `mode=ro` / `query_only` 读取，不修改应用记录或报告�
 ## 调度、模型与 Pilot
 
 - `ai.xiaomao.scan`：300 秒一次，扫描当前登记范围，完全不加载模型；任何树失败、排除、暂停或没有实际结果，CLI 都不报整体成功。
-- `ai.xiaomao.daily`：本机时区 21:30，`daily --scheduled`，仅有合适的新证据时尝试本地解读。
+- `ai.xiaomao.daily`：本机时区 21:30，`daily --scheduled`。这是唯一会自动加载模型的入口：某棵启用树有未提交改动、且同一证据快照没有通过校验的旧摘要时，才调用 `qwen3-coder:30b`；否则只出规则文本。`pause infer` 可关掉这条。
 - 项目说明消化：`ingest-briefing`（可加 `--project ID`）。只读已授权项目在 `briefing_docs_root` 下的 `00-项目说明.md`，切块后用深度模型压成 `reports/briefing/{id}.json`。总doc 本身不是工作树；扫描 / SwiftBar / `latest` 不读说明、不加载模型。`00` 未改则跳过。
 - 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载新模型。解读只带上述压缩 JSON 作不可信附加材料，不现场重读整份说明。静态审查缺口不等于今天测过或已上线。
 - `pause infer` / `resume infer`：控制推理；`pause scan` / `resume scan`：控制本系统任务。Pilot 起算和历史记录保留。
+- `pilot start` / `pilot status` / `pilot archive --reason TEXT`：归档结束当前一轮，不给通过或不通过结论；本轮元数据和窗口计数写入 `pilot_archived` 事件，扫描历史不动。归档后再 `start` 从当时重新起算。
 
-状态仍是 **PILOT_RUNNING**，不是 STABILITY_PASSED。CLI 回归、菜单运行、一次真实扫描都不能代替多日稳定性证据。
+第一轮 Pilot（2026-09-21 起）已于 2026-09-30 **PILOT_ARCHIVED**：只观察各仓主树，实际开发多在其他工作树，无法判断稳定性。不是 STABILITY_PASSED。CLI 回归、菜单运行、一次真实扫描都不能代替多日稳定性证据。
 
 ## 开发与验收
 

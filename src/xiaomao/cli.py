@@ -628,13 +628,19 @@ def cmd_health(ns: argparse.Namespace) -> int:
 
 
 def cmd_pilot(ns: argparse.Namespace) -> int:
-    from xiaomao.ops import mark_pilot_running, pilot_info
+    from xiaomao.ops import archive_pilot, mark_pilot_running, pilot_info
 
     home = _home_from_args(ns)
     ensure_layout(home)
     with open_db(layout(home)["db"]) as conn:
         if ns.action == "start":
             info = mark_pilot_running(conn)
+        elif ns.action == "archive":
+            try:
+                info = archive_pilot(conn, reason=ns.reason or "")
+            except ValueError as exc:
+                sys.stderr.write(f"error: {exc}\n")
+                return 2
         else:
             info = pilot_info(conn)
     json.dump(info, sys.stdout, ensure_ascii=False, indent=2)
@@ -731,7 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
     he.set_defaults(func=cmd_health)
 
     pi = sub.add_parser("pilot", help="试运行标记")
-    pi.add_argument("action", choices=["start", "status"])
+    pi.add_argument("action", choices=["start", "status", "archive"])
+    pi.add_argument("--reason", help="archive：结束本轮但不给通过 / 不通过结论的原因（必填）")
     pi.set_defaults(func=cmd_pilot)
     return p
 

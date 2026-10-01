@@ -99,6 +99,45 @@ class ReportCliTests(unittest.TestCase):
         self.assertEqual(payload["ok"], 0)
         self.assertEqual(payload["degraded"], payload["n"])
 
+    def test_pilot_archive_keeps_round_and_restart_starts_fresh(self) -> None:
+        home = self._home()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["--home", str(home), "pilot", "start"]), 0)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            first_start = conn.execute("SELECT value FROM meta WHERE key='pilot_started_at'").fetchone()["value"]
+            conn.execute("UPDATE meta SET value='2026-01-01T00:00:00+00:00' WHERE key='pilot_started_at'")
+        # A reason is required; without it nothing changes.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--home", str(home), "pilot", "archive"]), 2)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["--home", str(home), "pilot", "archive", "--reason", "观察范围不足"]), 0)
+        archived = json.loads(buf.getvalue())
+        self.assertEqual(archived["status"], "PILOT_ARCHIVED")
+        self.assertEqual(archived["started_at"], "2026-01-01T00:00:00+00:00")
+        self.assertGreaterEqual(archived["stats"]["scan_outcomes"].get("success", 0), 1)
+        # Archiving twice is refused: the round is already closed.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--home", str(home), "pilot", "archive", "--reason", "x"]), 2)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            events = conn.execute("SELECT payload_json FROM events WHERE kind='pilot_archived'").fetchall()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(json.loads(events[0]["payload_json"])["reason"], "观察范围不足")
+            scans = conn.execute("SELECT COUNT(*) AS n FROM scan_runs").fetchone()["n"]
+        self.assertGreaterEqual(scans, 1)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["--home", str(home), "pilot", "start"]), 0)
+        restarted = json.loads(buf.getvalue())
+        self.assertEqual(restarted["status"], "PILOT_RUNNING")
+        self.assertNotEqual(restarted["started_at"], "2026-01-01T00:00:00+00:00")
+        self.assertGreaterEqual(restarted["started_at"], first_start)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            self.assertIsNone(conn.execute("SELECT value FROM meta WHERE key='pilot_archived_at'").fetchone())
+            # History is kept, not reset.
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM scan_runs").fetchone()["n"], scans)
+
 
 class SummarizeTests(unittest.TestCase):
     def test_validator_rejects_unwarranted_pass(self) -> None:
