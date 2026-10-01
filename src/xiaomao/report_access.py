@@ -30,7 +30,8 @@ def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project
     expected = scope_set(cfg, project_id)
     if not expected:
         raise ValueError("没有可读取的授权范围")
-    folder = home / "reports" / ("projects" if kind == "status" else "daily")
+    folder_name = {"status": "projects", "briefing": "briefing"}.get(kind, "daily")
+    folder = home / "reports" / folder_name
     if folder.resolve() != home.resolve() / "reports" / folder.name:
         raise ValueError("报告目录越出数据 home")
     meta = json.loads(_read_file(path.with_suffix(".json"), folder, 128 * 1024))

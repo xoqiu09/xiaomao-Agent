@@ -4,7 +4,8 @@
 # Does not scan business repos, does not load a model, does not change LaunchAgents.
 set -e
 
-ROOT="/Users/xiuqiu/WorkSpace/xiaomao-Agent"
+# Install from whichever checkout this script lives in (repo or pinned release dir).
+ROOT="${XIAOMAO_ROOT:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 PLUGIN_SRC="$ROOT/scripts/swiftbar/xiaomao.1m.sh"
 PLUGIN_DIR="$HOME/Library/Application Support/Xiaomao/swiftbar-plugins"
 PLUGIN_DST="$PLUGIN_DIR/xiaomao.1m.sh"

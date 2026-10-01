@@ -26,6 +26,7 @@ def _cfg(home: Path, repo: Path, scan: bool = True) -> tuple[AppConfig, ProjectS
         worktrees=[wt],
     )
     cfg.projects = [project]
+    cfg.briefing_docs_root = str(home / "docs")
     return cfg, project, wt
 
 
@@ -242,6 +243,22 @@ class CollectTests(unittest.TestCase):
         self.assertIn("Wallet-Infrastructure", ids)
         self.assertEqual(ids, {"QAI", "wallet-core", "xiaomao-Agent", "xiuqiu-site", "AI-Web3-Learning", "Wallet-Infrastructure"})
         self.assertTrue(all(project_exclusion_reason(p) is None for p in projects))
+        # wallet-core stays scanned; only its menu dirty inventory is quieted.
+        quiet = {p.project_id for p in projects if p.menu_hide_dirty}
+        self.assertEqual(quiet, {"wallet-core"})
+        self.assertTrue(all(wt.scan for p in projects for wt in p.worktrees))
+
+    def test_menu_hide_dirty_round_trips_and_defaults_off(self) -> None:
+        root = self._tmp()
+        home = root / "home"
+        cfg, project, _wt = _cfg(home, root / "repo")
+        project.menu_hide_dirty = True
+        save_config(cfg)
+        self.assertTrue(load_config(home).project(project.project_id).menu_hide_dirty)
+        raw = json.loads((home / "config.json").read_text(encoding="utf-8"))
+        del raw["projects"][0]["menu_hide_dirty"]
+        (home / "config.json").write_text(json.dumps(raw), encoding="utf-8")
+        self.assertFalse(load_config(home).project(project.project_id).menu_hide_dirty)
 
     def test_scan_authorized_covers_every_fixture_project(self) -> None:
         root = self._tmp()

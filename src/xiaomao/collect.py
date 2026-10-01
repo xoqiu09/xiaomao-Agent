@@ -105,6 +105,13 @@ def _facts(snap: GitSnapshot, worktree_id: str, extra: dict | None = None) -> di
         "unstaged": unstaged,
         "untracked": untracked,
         "denied_paths": denied,
+        "last_commit_at": snap.last_commit_at,
+        "recent_subjects": list(snap.recent_subjects),
+        "module_digest": {
+            "new_modules": list(snap.module_digest.get("new_modules") or []),
+            "gone_modules": list(snap.module_digest.get("gone_modules") or []),
+            "changed_modules": list(snap.module_digest.get("changed_modules") or []),
+        },
         "discovered_worktrees": [
             {
                 "path": w.path,

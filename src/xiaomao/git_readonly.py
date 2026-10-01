@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from xiaomao.modules import classify_module_changes
+
 READONLY_ENV = {
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_TERMINAL_PROMPT": "0",
@@ -130,6 +132,9 @@ class GitSnapshot:
     error: str | None = None
     pre_head: str | None = None
     post_head: str | None = None
+    last_commit_at: str | None = None
+    recent_subjects: list[str] = field(default_factory=list)
+    module_digest: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def staged(self) -> list[StatusEntry]:
@@ -268,6 +273,8 @@ def collect_snapshot(worktree: Path) -> GitSnapshot:
         collection_status = "inconsistent"
         error = "HEAD changed during scan"
 
+    last_commit_at, recent_subjects, module_digest = collect_module_digest(worktree)
+
     return GitSnapshot(
         toplevel=toplevel,
         git_dir=git_dir_abs,
@@ -282,7 +289,76 @@ def collect_snapshot(worktree: Path) -> GitSnapshot:
         error=error,
         pre_head=pre_head,
         post_head=post_head,
+        last_commit_at=last_commit_at,
+        recent_subjects=recent_subjects,
+        module_digest=module_digest,
     )
+
+
+def collect_module_digest(
+    worktree: Path,
+    *,
+    since: str = "24 hours ago",
+    subject_limit: int = 8,
+) -> tuple[str | None, list[str], dict[str, list[str]]]:
+    """Read-only: last commit time, today's subjects, modules from name-status.
+
+    Never opens blob contents. Empty when the tree is unborn or git fails.
+    """
+    last_commit_at = None
+    stamp = run_git(worktree, "log", "-1", "--format=%cI", check=False)
+    if stamp.returncode == 0:
+        last_commit_at = stamp.stdout.strip() or None
+
+    subjects: list[str] = []
+    subj = run_git(
+        worktree,
+        "log",
+        f"--since={since}",
+        "--pretty=format:%s",
+        "--no-merges",
+        check=False,
+    )
+    if subj.returncode == 0:
+        for line in subj.stdout.splitlines():
+            text = line.strip()
+            if text and text not in subjects:
+                subjects.append(text)
+            if len(subjects) >= subject_limit:
+                break
+
+    added: list[str] = []
+    deleted: list[str] = []
+    modified: list[str] = []
+    names = run_git(
+        worktree,
+        "log",
+        f"--since={since}",
+        "--pretty=format:",
+        "--name-status",
+        "--no-renames",
+        "--no-merges",
+        check=False,
+    )
+    if names.returncode == 0:
+        for line in names.stdout.splitlines():
+            if not line or line[0] not in {"A", "M", "D", "T", "C"}:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            code, path = parts[0][0], parts[1]
+            if not path:
+                continue
+            if code == "A":
+                added.append(path)
+            elif code == "D":
+                deleted.append(path)
+            else:
+                modified.append(path)
+
+    digest = classify_module_changes(added, deleted, modified)
+    return last_commit_at, subjects, digest
 
 
 def snapshot_fingerprint(snap: GitSnapshot) -> str:
@@ -295,6 +371,7 @@ def snapshot_fingerprint(snap: GitSnapshot) -> str:
         "branch": snap.branch_ref,
         "detached": snap.is_detached,
         "unborn": snap.is_unborn,
+        "last_commit_at": snap.last_commit_at,
         "status": [
             {
                 "s": e.staged,

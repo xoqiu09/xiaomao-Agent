@@ -30,7 +30,7 @@ python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 
 ## 范围与数据位置
 
-正式数据在 `~/Library/Application Support/Xiaomao/`；全局 `--home PATH` 可覆盖。配置文件是 `config.json`，SQLite 为 `xiaomao.sqlite`，报告在 `reports/daily/`、`reports/handoff/`、`reports/projects/`。
+正式数据在 `~/Library/Application Support/Xiaomao/`；全局 `--home PATH` 可覆盖。配置文件是 `config.json`，SQLite 为 `xiaomao.sqlite`，报告在 `reports/daily/`、`reports/handoff/`、`reports/projects/`、`reports/briefing/`。
 
 默认只保留既有六项登记：QAI、wallet-core、xiaomao-Agent、xiuqiu-site、AI-Web3-Learning、Wallet-Infrastructure。新树不会自动获得权限，`projects: []` 不会扩回默认清单。
 
@@ -40,7 +40,17 @@ python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 
 ## SwiftBar
 
-插件为 `scripts/swiftbar/xiaomao.1m.sh`，每分钟刷新。按当前可读取个人项目显示扫描与交接状态，提供“查看交接与未核实项”按钮，在终端执行同一只读 CLI。按钮重新校验资料，刷新本身不采集、不加载模型。
+插件为 `scripts/swiftbar/xiaomao.1m.sh`，每分钟刷新。刷新本身不采集、不加载模型。菜单栏没事时只有小八的猫头（`image=` 彩色 PNG）；扫描过期显示「信息已过期」，最近一次扫描失败显示「扫描失败」。缺少或落后的交接不改标题——那不是扫描故障。
+
+点开菜单先看「今天」和「很久没看」：说的是模块和上次提交距今多久，不列文件名。「很久没看」只看上次提交日期，不假装知道文件夹有没有被打开过。没有模型解读时菜单会标明。
+
+菜单其余分层：
+
+- 主区：今日日报入口。日报必须通过范围校验才可点开；未核实只说明原因，不给快捷入口。
+- 「需要处理」：状态库不可读、陈旧、扫描失败 / 跳过、扫描暂停、某棵树采集 error。
+- 折叠的「技术细节」：「工作区未提交」按树列计数和最多两个文件名（只取已存事实里的 basename，不打开业务文件）；「交接 / 未核实项」只为已有交接文件的项目给“查看交接与未核实项”按钮，在终端执行同一只读 CLI 并重新校验。
+
+长期不动的旧仓可以在 `config.json` 里给该项目加 `"menu_hide_dirty": true`：它仍被扫描、仍写进日报，只是未提交清单不再出现在菜单里；它的采集 error 依旧进「需要处理」。默认 `false`，只影响菜单显示，不改授权范围。
 
 插件解析自己的真实路径，因此可以从隔离源码树运行。现用安装及源码身份见 [EXECUTION_STATE.md](EXECUTION_STATE.md)。已有 SwiftBar 不需要重新安装应用；切换插件软链接和调度脚本前先备份当前指向与 plist。
 
@@ -50,7 +60,8 @@ SQLite 使用 `mode=ro` / `query_only` 读取，不修改应用记录或报告�
 
 - `ai.xiaomao.scan`：300 秒一次，扫描当前登记范围，完全不加载模型；任何树失败、排除、暂停或没有实际结果，CLI 都不报整体成功。
 - `ai.xiaomao.daily`：本机时区 21:30，`daily --scheduled`，仅有合适的新证据时尝试本地解读。
-- 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载新模型。
+- 项目说明消化：`ingest-briefing`（可加 `--project ID`）。只读已授权项目在 `briefing_docs_root` 下的 `00-项目说明.md`，切块后用深度模型压成 `reports/briefing/{id}.json`。总doc 本身不是工作树；扫描 / SwiftBar / `latest` 不读说明、不加载模型。`00` 未改则跳过。
+- 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载新模型。解读只带上述压缩 JSON 作不可信附加材料，不现场重读整份说明。静态审查缺口不等于今天测过或已上线。
 - `pause infer` / `resume infer`：控制推理；`pause scan` / `resume scan`：控制本系统任务。Pilot 起算和历史记录保留。
 
 状态仍是 **PILOT_RUNNING**，不是 STABILITY_PASSED。CLI 回归、菜单运行、一次真实扫描都不能代替多日稳定性证据。

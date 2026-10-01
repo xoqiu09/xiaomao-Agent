@@ -71,6 +71,8 @@ class ReportCliTests(unittest.TestCase):
         self.assertEqual(payload["test_status"], "unknown")
         self.assertEqual(payload["deploy_status"], "unknown")
         self.assertTrue(any(wt.get("evidence_id") == "worktree:website-main" for wt in payload["worktrees"]))
+        self.assertIn("last_commit_at", payload["worktrees"][0])
+        self.assertIn("module_digest", payload["worktrees"][0])
 
     def test_question_about_shipped_still_rejected(self) -> None:
         facts = {"evidence_ids": ["ev_1"], "test_status": "unknown", "deploy_status": "unknown"}

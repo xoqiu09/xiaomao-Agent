@@ -13,19 +13,44 @@ import shlex
 import sqlite3
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from xiaomao.config import load_config
+from xiaomao.config import ProjectSpec, load_config
 from xiaomao.handoff_view import inspect_handoff
+from xiaomao.menu_briefing import (
+    facts_of_row,
+    latest_menu_briefing,
+    parse_menu_briefing,
+    rule_sentence,
+)
 from xiaomao.scope import project_exclusion_reason
 
 # Keep in lockstep with xiaomao.ops.GAP_WARN_AFTER_S (two missed 5-minute ticks + 60s).
 STALE_AFTER_S = 300 * 2 + 60
 DEFAULT_TZ = "Asia/Taipei"
 DEFAULT_HOME = Path.home() / "Library" / "Application Support" / "Xiaomao"
+HEAD_ICON = Path(__file__).resolve().parents[2] / "scripts" / "swiftbar" / "xiaoba-head.png"
+
+
+def _head_image() -> str:
+    """Single-line colour PNG for SwiftBar `image=`. Empty if the asset is missing."""
+    try:
+        data = HEAD_ICON.read_bytes()
+    except OSError:
+        return ""
+    if not data or len(data) > 64 * 1024:
+        return ""
+    return base64.b64encode(data).decode("ascii")
+
+
+def _title_line(label: str, image_b64: str) -> str:
+    suffix = "emojize=false symbolize=false"
+    if image_b64:
+        suffix = f"image={image_b64} {suffix}"
+    return f"{_escape(label)} | {suffix}" if label else f" | {suffix}"
 
 
 def _tz(name: str | None) -> ZoneInfo:
@@ -210,12 +235,14 @@ def _read_state(home: Path, project_ids: list[str]) -> dict[str, Any]:
                     f"""
                     SELECT
                       w.worktree_id AS worktree_id,
+                      w.project_id AS project_id,
                       w.scan_enabled AS scan_enabled,
                       o.collection_status AS collection_status,
                       o.staged_count AS staged_count,
                       o.unstaged_count AS unstaged_count,
                       o.untracked_count AS untracked_count,
-                      o.observed_at_utc AS observed_at_utc
+                      o.observed_at_utc AS observed_at_utc,
+                      o.facts_json AS facts_json
                     FROM worktrees w
                     LEFT JOIN observations o ON o.observation_id = (
                       SELECT observation_id FROM observations
@@ -261,17 +288,28 @@ def _daily_stamp(path: Path | None, tz: ZoneInfo, now_local: datetime) -> str:
     return f"{mtime.strftime('%Y-%m-%d')} {clock}"
 
 
-def _attention(state: dict[str, Any], *, stale: bool) -> list[str]:
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
+def _alerts(state: dict[str, Any], *, stale: bool) -> list[str]:
+    """Faults only: unreadable state, stale or failed scans, collection errors.
+
+    Uncommitted work is not a fault and is listed by _dirty_inventory instead.
+    """
     items: list[str] = []
     if state.get("db_missing"):
-        items.append("还没有状态库")
-        return items
+        return ["还没有状态库"]
     if state.get("db_busy"):
-        items.append("状态文件忙，未能读取")
-        return items
+        return ["状态文件忙，未能读取"]
     if not state.get("db_ok"):
-        items.append("状态文件不可读")
-        return items
+        return ["状态文件不可读"]
     if stale:
         items.append("扫描结果已过期")
     last_run = state.get("last_run")
@@ -287,30 +325,118 @@ def _attention(state: dict[str, Any], *, stale: bool) -> list[str]:
     for row in state.get("worktrees") or []:
         if not _row_get(row, "scan_enabled"):
             continue
-        wt = _row_get(row, "worktree_id") or "unknown"
-        status = _row_get(row, "collection_status")
-        if status == "error":
-            items.append(f"{wt} 采集状态：error")
-        dirty = (
-            int(_row_get(row, "staged_count") or 0)
-            + int(_row_get(row, "unstaged_count") or 0)
-            + int(_row_get(row, "untracked_count") or 0)
+        # A collection error is reported even for a menu-quieted project.
+        if _row_get(row, "collection_status") == "error":
+            items.append(f"{_row_get(row, 'worktree_id') or 'unknown'} 采集状态：error")
+    return _dedupe(items)
+
+
+def _sample_names(row: sqlite3.Row | None, limit: int = 2) -> list[str]:
+    """Basenames from the stored facts only; never opens a business file."""
+    raw = _row_get(row, "facts_json")
+    if not isinstance(raw, str):
+        return []
+    try:
+        facts = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(facts, dict):
+        return []
+    names: list[str] = []
+    for key in ("staged", "unstaged", "untracked"):
+        value = facts.get(key)
+        if not isinstance(value, list):
+            continue
+        for entry in value:
+            if isinstance(entry, str) and entry:
+                names.append(PurePosixPath(entry).name or entry)
+            if len(names) >= limit:
+                return names
+    return names
+
+
+def _dirty_inventory(state: dict[str, Any], quiet_projects: set[str]) -> list[str]:
+    """Uncommitted-work inventory, skipping projects quieted in config."""
+    items: list[str] = []
+    for row in state.get("worktrees") or []:
+        if not _row_get(row, "scan_enabled"):
+            continue
+        if (_row_get(row, "project_id") or "") in quiet_projects:
+            continue
+        staged = int(_row_get(row, "staged_count") or 0)
+        unstaged = int(_row_get(row, "unstaged_count") or 0)
+        untracked = int(_row_get(row, "untracked_count") or 0)
+        if staged + unstaged + untracked == 0:
+            continue
+        counts = f"staged {staged} / unstaged {unstaged} / untracked {untracked}"
+        sample = "、".join(_sample_names(row))
+        tail = f"　{sample}" if sample else ""
+        items.append(f"{_row_get(row, 'worktree_id') or 'unknown'} 未提交（{counts}）{tail}")
+    return _dedupe(items)
+
+
+def _facts_by_project(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Merge stored facts_json per project. Never opens a business file."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in state.get("worktrees") or []:
+        if not _row_get(row, "scan_enabled"):
+            continue
+        pid = _row_get(row, "project_id") or ""
+        if not pid:
+            continue
+        facts = facts_of_row(row)
+        merged = out.setdefault(
+            pid,
+            {
+                "last_commit_at": None,
+                "recent_subjects": [],
+                "module_digest": {"new_modules": [], "gone_modules": [], "changed_modules": []},
+            },
         )
-        if dirty:
-            items.append(
-                f"{wt} 工作区 dirty"
-                f"（staged {_row_get(row, 'staged_count') or 0}"
-                f" / unstaged {_row_get(row, 'unstaged_count') or 0}"
-                f" / untracked {_row_get(row, 'untracked_count') or 0}）"
-            )
-    # Preserve order, drop duplicates.
-    seen: set[str] = set()
-    unique: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            unique.append(item)
-    return unique
+        stamp = facts.get("last_commit_at")
+        if stamp and (merged["last_commit_at"] is None or str(stamp) > str(merged["last_commit_at"])):
+            merged["last_commit_at"] = stamp
+        for subject in facts.get("recent_subjects") or []:
+            if isinstance(subject, str) and subject and subject not in merged["recent_subjects"]:
+                merged["recent_subjects"].append(subject)
+        digest = facts.get("module_digest") if isinstance(facts.get("module_digest"), dict) else {}
+        for key in ("new_modules", "gone_modules", "changed_modules"):
+            bucket = merged["module_digest"][key]
+            for name in digest.get(key) or []:
+                if isinstance(name, str) and name and name not in bucket:
+                    bucket.append(name)
+    return out
+
+
+def _briefing_sections(
+    home: Path,
+    projects: list[ProjectSpec],
+    state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> tuple[list[str], list[str], bool]:
+    """Prefer the already-written menu briefing; else reconstruct from facts."""
+    path = latest_menu_briefing(home)
+    if path is not None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text:
+            today, idle, model_used = parse_menu_briefing(text)
+            if today or idle:
+                return today, idle, model_used
+    facts_map = _facts_by_project(state)
+    today: list[str] = []
+    idle: list[str] = []
+    for project in projects:
+        facts = facts_map.get(project.project_id) or {}
+        section, sentence = rule_sentence(project, facts, now=now)
+        if section == "today":
+            today.append(sentence)
+        elif section == "idle":
+            idle.append(sentence)
+    return today, idle, False
 
 
 def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str:
@@ -343,26 +469,62 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     if state.get("db_missing") or state.get("db_busy") or not state.get("db_ok"):
         stale = True
 
-    attention = _attention(state, stale=stale)
+    alerts = _alerts(state, stale=stale)
+    quiet_projects = {p.project_id for p in projects if p.menu_hide_dirty}
+    dirty = _dirty_inventory(state, quiet_projects)
+    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc)
     daily = latest_daily(home)
     reports = reports_dir(home)
+    scan_outcome = _row_get(last_run, "outcome")
+    image_b64 = _head_image()
 
+    # Quiet title: cat head only when the scan is fresh. Stale/error never
+    # pretend to be a green light.
     if stale:
-        title = "🐱 小猫｜信息已过期"
-    elif any(v.exit_code for v in views):
-        title = "🐱 小猫｜交接待核实"
+        title = "信息已过期"
+    elif scan_outcome == "error":
+        title = "扫描失败"
     elif age_s is None:
-        title = "🐱 小猫｜尚无扫描"
+        title = "尚无扫描"
     else:
-        title = f"🐱 小猫｜上次检查：{relative_zh(age_s)}"
+        title = ""
 
+    enabled_trees = sum(1 for row in state.get("worktrees") or [] if _row_get(row, "scan_enabled"))
     lines = [
-        f"{_escape(title)} | emojize=false symbolize=false",
+        _title_line(title, image_b64),
         "---",
-        f"最近一次扫描：{_escape(_outcome_zh(_row_get(last_run, 'outcome')))}",
-        f"需要关注：{len(attention)} 项",
-        f"日报更新时间：{_escape(_daily_stamp(daily, tz, now_local))}",
+        "今天",
     ]
+    if today:
+        lines.extend(f"-- {_escape(item)}" for item in today)
+    else:
+        lines.append("-- 今天没有新的模块变化。")
+    lines.append("很久没看")
+    if idle:
+        lines.extend(f"-- {_escape(item)}" for item in idle)
+    else:
+        lines.append("-- 没有很久没提交的项目。")
+    if not model_used:
+        lines.append("本次没有模型解读")
+
+    lines.append("---")
+    lines.append(f"扫描：{_escape(_outcome_zh(scan_outcome))} · {enabled_trees} 棵树")
+
+    daily_verified = False
+    if daily is not None and daily.is_file() and cfg:
+        from xiaomao.report_access import read_bound_report
+        try:
+            read_bound_report(daily, home, cfg, "daily")
+            daily_verified = True
+        except (OSError, ValueError):
+            pass
+    daily_stamp = _daily_stamp(daily, tz, now_local)
+    if daily_verified:
+        lines.append(f"打开日报 {_escape(daily.stem)}　{_escape(daily_stamp)} | href={file_href(daily)}")
+    elif daily is not None:
+        lines.append(f"最新日报范围未核实（旧文件保留，需重新生成）　{_escape(daily_stamp)}")
+    else:
+        lines.append("打开最新日报（尚无文件）")
 
     if stale:
         lines.append("---")
@@ -372,56 +534,55 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
         else:
             lines.append(f"最近成功扫描：{relative_zh(success_age_s)}")
 
-    if attention:
-        lines.append("---")
-        for item in attention:
-            lines.append(_escape(item))
+    lines.append("---")
+    if alerts:
+        lines.append(f"需要处理：{len(alerts)} 项")
+        for item in alerts:
+            lines.append(f"-- {_escape(item)}")
+    else:
+        lines.append("需要处理：无")
 
     lines.append("---")
-    daily_verified = False
-    if daily is not None and daily.is_file() and cfg:
-        from xiaomao.report_access import read_bound_report
-        try:
-            read_bound_report(daily, home, cfg, "daily")
-            daily_verified = True
-        except (OSError, ValueError):
-            pass
-    if daily_verified:
-        lines.append(f"打开最新日报 | href={file_href(daily)}")
-    elif daily is not None:
-        lines.append("最新日报范围未核实（旧文件保留，需重新生成）")
-    else:
-        lines.append("打开最新日报（尚无文件）")
-    lines.append("---")
-    lines.append("最新交接 / 未核实项")
+    lines.append("技术细节")
+    lines.append(f"-- 工作区未提交：{len(dirty)} 项")
+    for item in dirty:
+        lines.append(f"---- {_escape(item)}")
+    if quiet_projects:
+        lines.append(f"-- 已静音（仍在扫描与日报里）：{_escape('、'.join(sorted(quiet_projects)))}")
+    lines.append("-- 交接 / 未核实项")
     if not views:
-        lines.append("尚无可读取的个人项目配置")
+        lines.append("---- 尚无可读取的个人项目配置")
+    pending = [v for v in views if v.path is None]
     for view in views:
-        lines.append(_escape(f"{view.project_id}：{view.status}"))
-        lines.append(_escape(view.reason))
-        lines.append(_escape(f"生成（UTC）：{view.generated_at or 'unknown'}"))
-        lines.append(_escape(f"采集核对截至（UTC）：{view.collected_through or 'unknown'}"))
-        # Only encoded data crosses SwiftBar's shell-action boundary. The
-        # executable and script are fixed; the reader repeats validation.
+        if view.path is None:
+            continue
+        lines.append(_escape(f"---- {view.project_id}：{view.status}"))
+        lines.append(_escape(f"------ {view.reason}"))
+        lines.append(_escape(f"------ 生成（UTC）：{view.generated_at or 'unknown'}"))
+        lines.append(_escape(f"------ 采集核对截至（UTC）：{view.collected_through or 'unknown'}"))
         payload = base64.urlsafe_b64encode(json.dumps([str(home.resolve()), view.project_id]).encode()).decode()
         reader = Path(__file__).resolve().parents[2] / "scripts" / "read-handoff.py"
         lines.append(
-            f"{_escape('查看交接与未核实项：' + str(view.project_id))} | "
+            f"{_escape('------ 查看交接与未核实项：' + str(view.project_id))} | "
             f"bash={shlex.quote(sys.executable)} param1={shlex.quote(str(reader))} "
             f"param2={payload} terminal=true"
         )
-    lines.append("测试：unknown / 部署及验收：unknown；查询不会更新资料")
+    if pending:
+        names = "、".join(str(v.project_id) for v in pending)
+        lines.append(_escape(f"---- 尚无交接：{names}"))
+    lines.append("---- 测试：unknown / 部署及验收：unknown；查询不会更新资料")
     if reports.is_dir():
         lines.append(f"打开报告文件夹 | href={file_href(reports)}")
     else:
         lines.append("打开报告文件夹（尚无目录）")
 
     lines.append("---")
-    lines.append("只读入口：不扫描业务仓、不加载模型")
+    footnote = "只读 · 不扫描业务仓 · 不加载模型"
     if state.get("pilot_status"):
-        lines.append(f"试运行：{_escape(str(state['pilot_status']))}")
+        footnote += f" · {state['pilot_status']}"
     if state.get("infer_paused"):
-        lines.append("推理已暂停")
+        footnote += " · 推理已暂停"
+    lines.append(_escape(footnote))
     lines.append("刷新 | refresh=true")
     return "\n".join(lines) + "\n"
 
@@ -435,8 +596,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = render_menu(home)
     except Exception as exc:
+        image = _head_image()
+        suffix = "emojize=false symbolize=false"
+        if image:
+            suffix = f"image={image} {suffix}"
         text = (
-            "🐱 小猫｜信息已过期 | emojize=false symbolize=false\n"
+            f"信息已过期 | {suffix}\n"
             "---\n"
             f"插件错误：{_escape(type(exc).__name__)}\n"
             "只读入口：不扫描业务仓、不加载模型\n"

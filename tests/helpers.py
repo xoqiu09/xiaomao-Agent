@@ -60,4 +60,5 @@ def website_fixture_config(home: Path, repo: Path, extra_root: Path | None = Non
     cfg.external.mount = str(extra_root / "external")
     cfg.external.models_dir = str(extra_root / "external" / "models")
     cfg.external.data_dir = str(extra_root / "external" / "data")
+    cfg.briefing_docs_root = str(extra_root / "docs")
     return cfg

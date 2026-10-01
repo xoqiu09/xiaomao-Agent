@@ -343,6 +343,13 @@ def facts_payload(cfg: AppConfig, conn, project_id: str) -> dict[str, Any]:
                 "test_status": facts.get("test_status", "unknown"),
                 "deploy_status": facts.get("deploy_status", "unknown"),
                 "denied_paths": facts.get("denied_paths") or [],
+                "last_commit_at": facts.get("last_commit_at"),
+                "recent_subjects": list(facts.get("recent_subjects") or []),
+                "module_digest": {
+                    "new_modules": list((facts.get("module_digest") or {}).get("new_modules") or []),
+                    "gone_modules": list((facts.get("module_digest") or {}).get("gone_modules") or []),
+                    "changed_modules": list((facts.get("module_digest") or {}).get("changed_modules") or []),
+                },
             }
         )
     return {

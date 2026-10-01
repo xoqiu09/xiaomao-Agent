@@ -38,6 +38,10 @@ class ProjectSpec:
     approved_root: str
     worktrees: list[WorktreeSpec] = field(default_factory=list)
     report_dirs: list[str] = field(default_factory=list)
+    # Menu-only quieting for long-untouched repositories: the tree is still
+    # scanned and still reported in the daily. Collection errors are never
+    # hidden — only the uncommitted-work inventory in the SwiftBar menu.
+    menu_hide_dirty: bool = False
 
 
 @dataclass
@@ -59,12 +63,17 @@ class AppConfig:
     projects: list[ProjectSpec]
     ollama_host: str = "127.0.0.1:11434"
     ollama_no_cloud: bool = True
-    context_length: int = 8192
+    # 32768 fits a project brief + today's module digest. The installed models
+    # allow 256K; do not raise this without measuring daily-job memory.
+    context_length: int = 32768
     max_loaded_models: int = 1
     lite_model: str = "gemma4:12b"
     depth_candidates: list[str] = field(
         default_factory=lambda: ["qwen3-coder:30b", "qwen3.6:35b"]
     )
+    # Only the per-project 00-项目说明.md under this root is read for briefing.
+    # The folder itself is never registered as a worktree (it contains company docs).
+    briefing_docs_root: str = "/Users/xiuqiu/Desktop/总doc"
 
     def project(self, project_id: str) -> ProjectSpec:
         for p in self.projects:
@@ -97,6 +106,7 @@ def _repo(
     path: str,
     *,
     extras: list[WorktreeSpec] | None = None,
+    menu_hide_dirty: bool = False,
 ) -> ProjectSpec:
     trees = [
         WorktreeSpec(
@@ -113,6 +123,7 @@ def _repo(
         display_name=display_name,
         approved_root=path,
         worktrees=trees,
+        menu_hide_dirty=menu_hide_dirty,
     )
 
 
@@ -124,14 +135,18 @@ def default_projects() -> list[ProjectSpec]:
     until they are added here.
     """
     projects: list[ProjectSpec] = []
+    # wallet-core is a long-untouched SDK: keep scanning it, but keep its
+    # leftover uncommitted files out of the menu inventory.
     workspace = [
-        ("QAI", "QAI"),
-        ("wallet-core", "wallet-core"),
-        ("xiaomao-Agent", "xiaomao-Agent"),
-        ("xiuqiu-site", "xiuqiu-site"),
+        ("QAI", "QAI", False),
+        ("wallet-core", "wallet-core", True),
+        ("xiaomao-Agent", "xiaomao-Agent", False),
+        ("xiuqiu-site", "xiuqiu-site", False),
     ]
-    for project_id, display in workspace:
-        projects.append(_repo(project_id, display, f"{_WS}/{project_id}"))
+    for project_id, display, hide_dirty in workspace:
+        projects.append(
+            _repo(project_id, display, f"{_WS}/{project_id}", menu_hide_dirty=hide_dirty)
+        )
     projects.extend(
         [
             _repo("AI-Web3-Learning", "AI-Web3-Learning", f"{_HOME}/AI-Web3-Learning"),
@@ -163,6 +178,7 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
         "max_loaded_models": cfg.max_loaded_models,
         "lite_model": cfg.lite_model,
         "depth_candidates": cfg.depth_candidates,
+        "briefing_docs_root": cfg.briefing_docs_root,
         "external": {
             "mount": cfg.external.mount,
             "models_dir": cfg.external.models_dir,
@@ -176,6 +192,7 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
                 "display_name": p.display_name,
                 "approved_root": p.approved_root,
                 "report_dirs": p.report_dirs,
+                "menu_hide_dirty": p.menu_hide_dirty,
                 "worktrees": [
                     {
                         "worktree_id": w.worktree_id,
@@ -201,6 +218,8 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
                 display_name=p.get("display_name") or p["project_id"],
                 approved_root=p["approved_root"],
                 report_dirs=list(p.get("report_dirs") or []),
+                # Absent in older configs: quieting is opt-in, never inferred.
+                menu_hide_dirty=bool(p.get("menu_hide_dirty", False)),
                 worktrees=[
                     WorktreeSpec(
                         worktree_id=w["worktree_id"],
@@ -229,10 +248,11 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
         projects=projects if "projects" in data else default_projects(),
         ollama_host=data.get("ollama_host") or "127.0.0.1:11434",
         ollama_no_cloud=bool(data.get("ollama_no_cloud", True)),
-        context_length=int(data.get("context_length") or 8192),
+        context_length=int(data.get("context_length") or 32768),
         max_loaded_models=int(data.get("max_loaded_models") or 1),
         lite_model=data.get("lite_model") or "gemma4:12b",
         depth_candidates=list(data.get("depth_candidates") or ["qwen3-coder:30b", "qwen3.6:35b"]),
+        briefing_docs_root=data.get("briefing_docs_root") or "/Users/xiuqiu/Desktop/总doc",
     )
 
 

@@ -8,6 +8,11 @@ config.json → scope（登记、符号链接、有限 Git 指针检查）
             → store（不可变观察、scan_runs、绑定 run_id 的范围证明事件）
             → render.authorized_rows → reports（规则正文 + 来源校验文件）
             → handoff_view.inspect_handoff → CLI / SwiftBar
+
+briefing_docs_root/{project_id}/00-项目说明.md
+            → briefing.ingest_project（离线切块，持扫描锁）
+            → reports/briefing/{id}.json
+            → summarize extra（不可信静态理解；HEAD/测试/部署仍只来自 SQLite）
 ```
 
 CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集只执行只读命令，不 fetch、不运行项目测试、不执行 hooks。路径过滤与密钥片段规则在 `policy.py`。
@@ -23,6 +28,8 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
 | `handoff_view.py` | 交接文件哈希、范围、观察 ID、扫描覆盖、时间和最新失败校验 |
 | `report_access.py` | 旧日报 / 状态文件不能绕过当前授权范围 |
 | `swiftbar.py`, `scripts/read-handoff.py` | 菜单与固定只读查询入口；参数作为数据传递 |
+| `briefing.py` | 只读授权项目的 `00-项目说明.md`，切块消化为压缩 JSON；不是工作树扫描 |
+| `menu_briefing.py` | 菜单短句；扫描 / 查询路径不加载模型 |
 | `summarize.py`, `ollama_runtime.py`, `ops.py` | 可选本地解读、校验、去重、降级、卸载 |
 | `schedule.py`, `scripts/xiaomao-*.sh` | 用户级调度；脚本从自身位置找源码 |
 | `tests/`, `scripts/accept.py` | 临时 home 回归与明确隔离范围的验收 |

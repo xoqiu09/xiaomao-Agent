@@ -99,6 +99,16 @@ def looks_like_secret(text: str) -> bool:
     return False
 
 
+def redact_secret_spans(text: str) -> str:
+    """Replace secret-shaped spans in place. Does not truncate the rest."""
+    if not text:
+        return text
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[redacted]", out)
+    return out
+
+
 def redact_text(text: str) -> str:
     if looks_like_secret(text):
         return "[redacted: potential secret]"

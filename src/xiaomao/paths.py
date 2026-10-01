@@ -32,6 +32,7 @@ def layout(home: Path) -> dict[str, Path]:
         "reports_daily": home / "reports" / "daily",
         "reports_projects": home / "reports" / "projects",
         "reports_handoff": home / "reports" / "handoff",
+        "reports_briefing": home / "reports" / "briefing",
         "logs": home / "logs",
         "cache": home / "cache",
         "lock": home / "xiaomao.lock",
@@ -47,6 +48,7 @@ def ensure_layout(home: Path) -> dict[str, Path]:
         "reports_daily",
         "reports_projects",
         "reports_handoff",
+        "reports_briefing",
         "logs",
         "cache",
     ):

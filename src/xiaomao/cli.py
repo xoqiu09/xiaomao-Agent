@@ -236,8 +236,11 @@ def _maybe_model_note(
     except Exception:
         client = None
 
+    from xiaomao.briefing import extra_for_summarize
+
+    extra = extra_for_summarize(cfg, project_id)
     before = host_pressure()
-    result = summarize_or_degrade(cfg, facts, client=client)
+    result = summarize_or_degrade(cfg, facts, extra=extra, client=client)
     after = host_pressure()
     loaded_after: list[str] | None = None
     try:
@@ -285,8 +288,56 @@ def cmd_daily(ns: argparse.Namespace) -> int:
     with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
         note, model_ok = _maybe_model_note(ns, cfg, conn, None, scheduled=scheduled)
         dest = write_daily(cfg, conn, date=date, model_note=note, model_ok=model_ok)
+        from xiaomao.menu_briefing import write_menu_briefing
+
+        briefing_client = None
+        if model_ok or bool(getattr(ns, "with_model", False)):
+            briefing_client = _briefing_client(cfg)
+        write_menu_briefing(
+            cfg,
+            conn,
+            date=date,
+            client=briefing_client,
+            with_model=bool(briefing_client is not None),
+        )
     sys.stdout.write(f"{dest}\n")
     return 0
+
+
+def _briefing_client(cfg):
+    try:
+        from xiaomao.ollama_runtime import OllamaClient, inspect_running, models_dir_allowed
+
+        models_dir_allowed(cfg)
+        info = inspect_running(cfg)
+        if info["reachable"]:
+            return OllamaClient(cfg)
+    except Exception:
+        return None
+    return None
+
+
+def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
+    from xiaomao.briefing import ingest_authorized
+
+    home = _home_from_args(ns)
+    ensure_layout(home)
+    cfg = load_config(home)
+    cfg.home = str(home)
+    if ns.project:
+        if reason := project_exclusion_reason(cfg.project(ns.project)):
+            sys.stderr.write(f"范围已排除：{reason}\n")
+            return 3
+    with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0):
+        results = ingest_authorized(
+            cfg,
+            project_id=ns.project,
+            client_factory=lambda: _briefing_client(cfg),
+        )
+    json.dump({"results": results}, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    failed = not results or any(row.get("status") not in ("ok", "unchanged") for row in results)
+    return 3 if failed else 0
 
 
 def cmd_handoff(ns: argparse.Namespace) -> int:
@@ -616,6 +667,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("storage", help="存储占用（dry-run）")
     st.set_defaults(func=cmd_storage)
+
+    ing = sub.add_parser(
+        "ingest-briefing",
+        help="消化授权项目的 00-项目说明.md（离线切块；不扫描、不改 Git）",
+    )
+    ing.add_argument("--project", default=None, help="省略则逐个消化全部已授权项目")
+    ing.set_defaults(func=cmd_ingest_briefing)
 
     daily = sub.add_parser("daily", help="生成日报（默认规则；--with-model 才尝试本地模型）")
     daily.add_argument("--date", help="YYYY-MM-DD，默认本机时区今天")

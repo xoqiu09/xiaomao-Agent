@@ -295,8 +295,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--isolated", action="store_true", help="explicitly select the default isolated mode")
     parser.parse_args(argv)
     report = new_report()
-    # Ignore caller TMPDIR as well as XIAOMAO_HOME; no external-volume fixture.
-    with tempfile.TemporaryDirectory(prefix="xiaomao-accept-", dir="/tmp") as tmp:
+    # Isolated fixtures stay in the process TMPDIR (sandbox-safe). Do not reuse
+    # caller XIAOMAO_HOME or the live Application Support tree.
+    scratch = os.environ.get("TMPDIR") or None
+    with tempfile.TemporaryDirectory(prefix="xiaomao-accept-", dir=scratch) as tmp:
         env = isolated_env(Path(tmp))
         for check in (lambda: isolated_checks(Path(tmp), env, report), lambda: run_unit_tests(env, report)):
             try:
