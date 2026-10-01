@@ -129,7 +129,14 @@ def _facts(snap: GitSnapshot, worktree_id: str, extra: dict | None = None) -> di
     return payload
 
 
-def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) -> dict:
+def scan_worktree(
+    conn,
+    cfg: AppConfig,
+    project: ProjectSpec,
+    wt: WorktreeSpec,
+    *,
+    expect_common_dir: str | None = None,
+) -> dict:
     exclusion = project_exclusion_reason(project) or worktree_exclusion_reason(wt.path)
     if exclusion:
         return {
@@ -183,6 +190,14 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
             "observation_id": observation_id,
         }
 
+    if expect_common_dir is not None and os.path.realpath(snap.git_common_dir) != os.path.realpath(expect_common_dir):
+        # The path now belongs to a different repository; record nothing.
+        return {
+            "worktree_id": wt.worktree_id,
+            "status": "excluded",
+            "inserted": False,
+            "reason": "not_same_repository",
+        }
     fingerprint = snapshot_fingerprint(snap)
     last = latest_observation(conn, wt.worktree_id)
     if _matches_observation(last, fingerprint, snap.collection_status):
@@ -270,7 +285,7 @@ def scan_worktree(conn, cfg: AppConfig, project: ProjectSpec, wt: WorktreeSpec) 
         "discovered_unauthorized": [
             w.path
             for w in snap.worktrees
-            if not _authorized(project, w.path)
+            if not _authorized(project, w.path) and not _prefix_match(project, w)
         ],
     }
 
@@ -283,6 +298,13 @@ def _authorized(project: ProjectSpec, path: str) -> bool:
     return False
 
 
+def _prefix_match(project: ProjectSpec, found) -> bool:
+    if not project.branch_prefixes or found.bare or found.detached:
+        return False
+    branch = _short_branch(found.branch)
+    return bool(branch) and any(branch.startswith(prefix) for prefix in project.branch_prefixes)
+
+
 def _record_discovered(conn, project: ProjectSpec, wt: WorktreeSpec, snap: GitSnapshot) -> None:
     for discovered in snap.worktrees:
         record_discovered_worktree(
@@ -292,7 +314,7 @@ def _record_discovered(conn, project: ProjectSpec, wt: WorktreeSpec, snap: GitSn
             head_oid=discovered.head,
             branch_ref=discovered.branch,
             detached=discovered.detached,
-            authorized=_authorized(project, discovered.path),
+            authorized=_authorized(project, discovered.path) or _prefix_match(project, discovered),
         )
 
 
@@ -387,6 +409,114 @@ def _record_scan_run(
         )
 
 
+PREFIX_WORKTREE_NOTE = "branch_prefix"
+
+
+def _short_branch(ref: str | None) -> str | None:
+    if not ref or not ref.startswith("refs/heads/"):
+        return None
+    return ref[len("refs/heads/"):]
+
+
+def prefix_worktree_id(project_id: str, path: str) -> str:
+    """Stable id for an auto-observed tree: same path, same id across scans."""
+    import hashlib
+
+    digest = hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()[:10]
+    return f"{project_id}~{digest}"
+
+
+def prefix_candidates(project: ProjectSpec, snap: GitSnapshot) -> list[tuple[WorktreeSpec, str]]:
+    """Other trees of the main tree's repo whose branch matches a prefix.
+
+    Detached and bare trees never qualify: without a branch name there is no
+    rule to match. Paths still go through the same exclusion checks as
+    registered trees before anything is read.
+    """
+    if not project.branch_prefixes:
+        return []
+    out: list[tuple[WorktreeSpec, str]] = []
+    for found in snap.worktrees:
+        if _authorized(project, found.path) or not _prefix_match(project, found):
+            continue
+        branch = _short_branch(found.branch)
+        spec = WorktreeSpec(
+            worktree_id=prefix_worktree_id(project.project_id, found.path),
+            path=found.path,
+            scan=True,
+            notes=PREFIX_WORKTREE_NOTE,
+        )
+        out.append((spec, branch))
+    return out
+
+
+def _main_snapshot(project: ProjectSpec) -> GitSnapshot | None:
+    for wt in project.worktrees:
+        if not wt.scan or worktree_exclusion_reason(wt.path):
+            continue
+        try:
+            return collect_snapshot(Path(wt.path).expanduser())
+        except Exception:
+            continue
+    return None
+
+
+def _mark_gone_prefix_trees(conn, project: ProjectSpec, live_ids: set[str]) -> list[dict]:
+    """A prefix tree missing from `git worktree list` is gone, not an error."""
+    rows = conn.execute(
+        "SELECT worktree_id, canonical_path FROM worktrees"
+        " WHERE project_id = ? AND notes = ? AND scan_enabled = 1",
+        (project.project_id, PREFIX_WORKTREE_NOTE),
+    ).fetchall()
+    gone = []
+    for row in rows:
+        if row["worktree_id"] in live_ids:
+            continue
+        conn.execute(
+            "UPDATE worktrees SET scan_enabled = 0 WHERE worktree_id = ?",
+            (row["worktree_id"],),
+        )
+        insert_event(
+            conn,
+            kind="worktree_gone",
+            project_id=project.project_id,
+            payload={"worktree_id": row["worktree_id"], "path": row["canonical_path"]},
+        )
+        gone.append({"worktree_id": row["worktree_id"], "status": "gone", "inserted": False})
+    return gone
+
+
+def scan_prefix_worktrees(conn, cfg: AppConfig, project: ProjectSpec) -> list[dict]:
+    """Observe branch-prefix trees. Never affects the project's scan outcome."""
+    snap = _main_snapshot(project)
+    if snap is None:
+        return []
+    candidates = prefix_candidates(project, snap)
+    results: list[dict] = []
+    live: set[str] = set()
+    for spec, branch in candidates:
+        # Prunable entries stay in `git worktree list` after the directory is
+        # deleted; treat them as gone instead of collecting an error.
+        if not Path(spec.path).is_dir() or worktree_exclusion_reason(spec.path):
+            continue
+        live.add(spec.worktree_id)
+        upsert_worktree(
+            conn,
+            worktree_id=spec.worktree_id,
+            project_id=project.project_id,
+            canonical_path=os.path.realpath(spec.path),
+            common_git_dir_id=snap.git_common_dir,
+            scan_enabled=True,
+            notes=PREFIX_WORKTREE_NOTE,
+        )
+        row = scan_worktree(conn, cfg, project, spec, expect_common_dir=snap.git_common_dir)
+        row["branch"] = branch
+        row["source"] = PREFIX_WORKTREE_NOTE
+        results.append(row)
+    results.extend(_mark_gone_prefix_trees(conn, project, live))
+    return results
+
+
 def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
     from xiaomao.handoff_view import scope_identity
 
@@ -444,7 +574,23 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
         last_safe_error="; ".join(str(e) for e in errors if e)[:400] or None,
         scope_sha256=scan_scope_sha256 if outcome in {"success", "error"} else None,
     )
-    return results
+    # Supplementary observation. Recorded separately so the registered scope,
+    # its scan_run outcome and handoff coverage stay exactly as before.
+    extra = scan_prefix_worktrees(conn, cfg, project) if outcome != "skip" else []
+    if extra:
+        insert_event(
+            conn,
+            kind="prefix_scan",
+            project_id=project_id,
+            payload={
+                "prefixes": list(project.branch_prefixes),
+                "trees": [
+                    {k: row.get(k) for k in ("worktree_id", "branch", "status", "observation_id")}
+                    for row in extra
+                ],
+            },
+        )
+    return results + extra
 
 
 def scan_authorized(conn, cfg: AppConfig, project_id: str | None = None) -> dict[str, list[dict]]:

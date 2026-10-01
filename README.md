@@ -34,6 +34,13 @@ python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 
 默认只保留既有六项登记：QAI、wallet-core、xiaomao-Agent、xiuqiu-site、AI-Web3-Learning、Wallet-Infrastructure。新树不会自动获得权限，`projects: []` 不会扩回默认清单。
 
+可选的分支前缀观察：在项目里加 `"branch_prefixes": ["codex/"]` 后，扫描主树时会读取同一仓库的 `git worktree list`，分支名以这些前缀开头的其他工作树会被一并只读采集。约束如下：
+- detached、bare、目录已删除（prunable）的树不纳入；路径命中排除规则、或已不属于同一仓库的树不采集。
+- 这些树不写回 `config.json`，不计入范围哈希、交接覆盖和 `scan_runs` 结果；它们出错也不会把项目扫描判为失败。
+- 之前纳入的树从列表里消失后，记一条 `worktree_gone` 事件并停止观察，不算错误。
+- 日报在每个项目下列出「其他工作树」：分支、HEAD、最近提交时间、是否有未提交改动。菜单的未提交清单显示「项目 · 分支」。
+默认为空，即不观察其他树。
+
 公司项目（包括 theAIapp-service 各树、event-services-chooseme-event）、已登记的退役路径、`_待删除旧项目_2026-09-22` 归档以及 Stats / AgentNotch / TokenMonitor 第三方工具不进入活动采集。兼容链接和 Git 的 `.git` / `commondir` 指针也受检查；只检查有限元数据，命中排除目标即停止。完全改名且没有可识别来源指针的独立克隆仍需要维护者明确识别并排除。
 
 历史日报可能包含后来撤销的项目。`latest` / `open` 只接受与当前范围匹配、正文哈希有效的日报 / 状态文件；旧文件保留但不提供绕过校验的快捷入口。
