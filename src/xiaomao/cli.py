@@ -757,6 +757,8 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("action", choices=["start", "status", "archive"])
     pi.add_argument("--reason", help="archive：结束本轮但不给通过 / 不通过结论的原因（必填）")
     pi.set_defaults(func=cmd_pilot)
+    from xiaomao.document_commands import add_parser as add_document_parser
+    add_document_parser(sub)
     return p
 
 
