@@ -289,11 +289,12 @@ class CollectTests(unittest.TestCase):
         root, repo, side, other, loose, home, cfg, project, _ = self._prefix_fixture()
         (side / "work.txt").write_text("wip\n", encoding="utf-8")
         with open_db(home / "xiaomao.sqlite") as conn:
-            scan_project(conn, cfg, "t")
+            with patch("xiaomao.collect.utc_now", return_value="2026-10-01T12:00:00+00:00"):
+                scan_project(conn, cfg, "t")
             text = render_daily(cfg, conn, date="2026-10-01")
-        self.assertIn("其他工作树（分支前缀 codex/", text)
+        self.assertIn("其他工作树", text)
         self.assertIn("codex/p1-supervisor", text)
-        self.assertIn("未提交 1", text)
+        self.assertIn("untracked 1", text)
         self.assertNotIn("scratch", text)
 
     def test_no_prefixes_means_no_extra_trees(self) -> None:

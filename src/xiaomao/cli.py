@@ -273,34 +273,16 @@ def _maybe_model_note(
 
 
 def cmd_daily(ns: argparse.Namespace) -> int:
-    from xiaomao.reports import local_today, write_daily
-
+    from xiaomao.daily_jobs import run_daily
     home = _home_from_args(ns)
-    ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
-    cfg.projects = [p for p in cfg.projects if not project_exclusion_reason(p)]
-    if not cfg.projects:
+    if not any(not project_exclusion_reason(p) for p in cfg.projects) and not cfg.personal_roots:
         sys.stderr.write("尚无可读取的个人项目；未生成日报、未加载模型。\n")
         return 3
-    date = ns.date or local_today(cfg)
-    scheduled = bool(getattr(ns, "scheduled", False))
-    with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
-        note, model_ok = _maybe_model_note(ns, cfg, conn, None, scheduled=scheduled)
-        dest = write_daily(cfg, conn, date=date, model_note=note, model_ok=model_ok)
-        from xiaomao.menu_briefing import write_menu_briefing
-
-        briefing_client = None
-        if model_ok or bool(getattr(ns, "with_model", False)):
-            briefing_client = _briefing_client(cfg)
-        write_menu_briefing(
-            cfg,
-            conn,
-            date=date,
-            client=briefing_client,
-            with_model=bool(briefing_client is not None),
-        )
-    sys.stdout.write(f"{dest}\n")
+    paths = run_daily(cfg, date=ns.date, scheduled=ns.scheduled, with_model=ns.with_model)
+    for path in paths:
+        sys.stdout.write(f"{path}\n")
     return 0
 
 
@@ -315,6 +297,11 @@ def _briefing_client(cfg):
     except Exception:
         return None
     return None
+
+
+def cmd_projects(ns: argparse.Namespace) -> int:
+    from xiaomao.project_commands import projects_command
+    return projects_command(ns, _home_from_args(ns))
 
 
 def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
@@ -682,10 +669,21 @@ def build_parser() -> argparse.ArgumentParser:
     ing.set_defaults(func=cmd_ingest_briefing)
 
     daily = sub.add_parser("daily", help="生成日报（默认规则；--with-model 才尝试本地模型）")
-    daily.add_argument("--date", help="YYYY-MM-DD，默认本机时区今天")
+    daily.add_argument("--date", help="YYYY-MM-DD，表示该日配置截止时间结束的窗口；默认今天")
     daily.add_argument("--with-model", action="store_true")
-    daily.add_argument("--scheduled", action="store_true", help="21:30 调度：无新证据不加载模型")
+    daily.add_argument("--scheduled", action="store_true", help="补齐已截止的日报窗口；每窗口仅提醒一次")
     daily.set_defaults(func=cmd_daily)
+
+    projects = sub.add_parser("projects", help="个人仓库候选、覆盖及日报配置")
+    projects.add_argument("action", choices=["discover", "coverage", "configure"])
+    projects.add_argument("--root", action="append", help="个人目录，可重复；configure 时替换目录清单")
+    projects.add_argument("--date", help="coverage：该日截止的日报窗口")
+    projects.add_argument("--project", help="configure：要调整的项目")
+    projects.add_argument("--worktrees", choices=["registered", "prefixes", "all"])
+    projects.add_argument("--time", help="configure：日报截止时间 HH:MM")
+    projects.add_argument("--timezone", help="configure：例如 Asia/Taipei")
+    projects.add_argument("--notify", choices=["on", "off"])
+    projects.set_defaults(func=cmd_projects)
 
     ho = sub.add_parser("handoff", help="生成交接材料")
     ho.add_argument("--project", required=True)

@@ -426,14 +426,16 @@ def _briefing_sections(
     state: dict[str, Any],
     *,
     now: datetime | None = None,
+    cfg=None,
 ) -> tuple[list[str], list[str], bool]:
     """Prefer the already-written menu briefing; else reconstruct from facts."""
     path = latest_menu_briefing(home)
-    if path is not None:
+    if path is not None and cfg is not None:
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            text = ""
+            from xiaomao.report_access import read_bound_report
+            text = read_bound_report(path, home, cfg, "briefing")
+        except (OSError, ValueError, KeyError, TypeError):
+            return ["日报摘要范围未核实，请重新生成。"], [], False
         if text:
             today, idle, model_used = parse_menu_briefing(text)
             if today or idle:
@@ -484,7 +486,7 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     alerts = _alerts(state, stale=stale)
     quiet_projects = {p.project_id for p in projects if p.menu_hide_dirty}
     dirty = _dirty_inventory(state, quiet_projects)
-    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc)
+    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc, cfg=cfg)
     daily = latest_daily(home)
     reports = reports_dir(home)
     scan_outcome = _row_get(last_run, "outcome")
