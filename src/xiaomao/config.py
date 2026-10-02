@@ -47,6 +47,7 @@ class ProjectSpec:
     # the current scan only. Empty = no extra trees. Never written back as
     # registrations; a tree that disappears is recorded as gone, not error.
     branch_prefixes: list[str] = field(default_factory=list)
+    worktree_policy: str = "registered"  # registered, prefixes, all
 
 
 @dataclass
@@ -66,6 +67,10 @@ class AppConfig:
     home: str
     external: ExternalVolume
     projects: list[ProjectSpec]
+    daily_time: str = "21:30"
+    daily_notify: bool = True
+    personal_roots: list[str] = field(default_factory=list)
+    personal_owners: list[str] = field(default_factory=lambda: ["xoqiu09"])
     ollama_host: str = "127.0.0.1:11434"
     ollama_no_cloud: bool = True
     # 32768 fits a project brief + today's module digest. The installed models
@@ -177,6 +182,10 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
         "timezone": cfg.timezone,
         "policy_version": cfg.policy_version,
         "home": cfg.home,
+        "daily_time": cfg.daily_time,
+        "daily_notify": cfg.daily_notify,
+        "personal_roots": cfg.personal_roots,
+        "personal_owners": cfg.personal_owners,
         "ollama_host": cfg.ollama_host,
         "ollama_no_cloud": cfg.ollama_no_cloud,
         "context_length": cfg.context_length,
@@ -199,6 +208,7 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
                 "report_dirs": p.report_dirs,
                 "menu_hide_dirty": p.menu_hide_dirty,
                 "branch_prefixes": p.branch_prefixes,
+                "worktree_policy": p.worktree_policy,
                 "worktrees": [
                     {
                         "worktree_id": w.worktree_id,
@@ -215,9 +225,17 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
 
 
 def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
+    from datetime import time
+    daily_time = data.get("daily_time", "21:30")
+    if not isinstance(daily_time, str) or len(daily_time) != 5:
+        raise ValueError("daily_time must be HH:MM")
+    time.fromisoformat(daily_time)
     ext = data.get("external") or {}
     projects = []
     for p in data.get("projects") or []:
+        policy = p.get("worktree_policy", "registered")
+        if policy not in {"registered", "prefixes", "all"}:
+            raise ValueError("unknown worktree_policy")
         projects.append(
             ProjectSpec(
                 project_id=p["project_id"],
@@ -227,6 +245,7 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
                 # Absent in older configs: quieting is opt-in, never inferred.
                 menu_hide_dirty=bool(p.get("menu_hide_dirty", False)),
                 branch_prefixes=[str(x) for x in (p.get("branch_prefixes") or []) if str(x).strip()],
+                worktree_policy=policy,
                 worktrees=[
                     WorktreeSpec(
                         worktree_id=w["worktree_id"],
@@ -243,6 +262,10 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
         timezone=data.get("timezone") or "Asia/Taipei",
         policy_version=data.get("policy_version") or POLICY_VERSION,
         home=str(home),
+        daily_time=daily_time,
+        daily_notify=bool(data.get("daily_notify", True)),
+        personal_roots=list(data.get("personal_roots") or []),
+        personal_owners=list(data.get("personal_owners", ["xoqiu09"])),
         external=ExternalVolume(
             mount=ext.get("mount") or str(DEFAULT_EXTERNAL_MOUNT),
             models_dir=ext.get("models_dir") or str(DEFAULT_MODELS_DIR),

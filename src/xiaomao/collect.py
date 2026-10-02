@@ -107,6 +107,8 @@ def _facts(snap: GitSnapshot, worktree_id: str, extra: dict | None = None) -> di
         "denied_paths": denied,
         "last_commit_at": snap.last_commit_at,
         "recent_subjects": list(snap.recent_subjects),
+        "content_changes": snap.content_changes,
+        "evidence_limitations": snap.evidence_limitations,
         "module_digest": {
             "new_modules": list(snap.module_digest.get("new_modules") or []),
             "gone_modules": list(snap.module_digest.get("gone_modules") or []),
@@ -148,6 +150,15 @@ def scan_worktree(
     path = Path(wt.path).expanduser()
     observed_at = utc_now()
     try:
+        from xiaomao.inventory import metadata
+        identity = metadata(str(path))
+        if getattr(wt, "_expected_repo_id", identity["repo_id"]) != identity["repo_id"]:
+            return {"worktree_id": wt.worktree_id, "status": "excluded", "inserted": False,
+                    "reason": "repository_identity_changed"}
+        expect_common_dir = expect_common_dir or getattr(wt, "_expected_common_dir", None)
+        if expect_common_dir and os.path.realpath(identity["common_dir"]) != os.path.realpath(expect_common_dir):
+            return {"worktree_id": wt.worktree_id, "status": "excluded", "inserted": False,
+                    "reason": "not_same_repository"}
         snap = collect_snapshot(path)
     except Exception as exc:
         observation_id = _new_id("obs")
@@ -198,6 +209,10 @@ def scan_worktree(
             "inserted": False,
             "reason": "not_same_repository",
         }
+    from xiaomao.ops import storage_over_budget
+    if storage_over_budget(Path(cfg.home)):
+        snap.content_changes = [dict(item, patch="") for item in snap.content_changes]
+        snap.evidence_limitations.append("storage_budget")
     fingerprint = snapshot_fingerprint(snap)
     last = latest_observation(conn, wt.worktree_id)
     if _matches_observation(last, fingerprint, snap.collection_status):
@@ -212,6 +227,7 @@ def scan_worktree(
             scan_enabled=wt.scan,
             notes=wt.notes,
         )
+        _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, last["observation_id"])
         return {
             "worktree_id": wt.worktree_id,
             "status": "unchanged",
@@ -270,6 +286,7 @@ def scan_worktree(
     )
     _record_discovered(conn, project, wt, snap)
     _insert_status_evidence(conn, observation_id, observed_at, snap)
+    _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, observation_id)
 
     return {
         "worktree_id": wt.worktree_id,
@@ -288,6 +305,17 @@ def scan_worktree(
             if not _authorized(project, w.path) and not _prefix_match(project, w)
         ],
     }
+
+
+def _record_daily_snapshot(conn, cfg, project, wt, snap, at, observation_id):
+    from xiaomao.activity import record_snapshot
+    try:
+        record_snapshot(conn, cfg, project, wt, snap, at, observation_id)
+    except Exception as exc:
+        # Preserve registered observation/handoff behavior, but surface the
+        # separate daily-evidence failure in coverage, never as "no changes".
+        insert_event(conn, kind="daily_evidence_error", project_id=project.project_id,
+                     payload={"worktree_id": wt.worktree_id, "error": type(exc).__name__})
 
 
 def _authorized(project: ProjectSpec, path: str) -> bool:
@@ -455,6 +483,8 @@ def _main_snapshot(project: ProjectSpec) -> GitSnapshot | None:
         if not wt.scan or worktree_exclusion_reason(wt.path):
             continue
         try:
+            from xiaomao.inventory import metadata
+            metadata(wt.path)
             return collect_snapshot(Path(wt.path).expanduser())
         except Exception:
             continue
@@ -488,6 +518,8 @@ def _mark_gone_prefix_trees(conn, project: ProjectSpec, live_ids: set[str]) -> l
 
 def scan_prefix_worktrees(conn, cfg: AppConfig, project: ProjectSpec) -> list[dict]:
     """Observe branch-prefix trees. Never affects the project's scan outcome."""
+    if not project.branch_prefixes:
+        return []
     snap = _main_snapshot(project)
     if snap is None:
         return []
@@ -535,6 +567,8 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
         )
         return [{"project": project_id, "status": "excluded", "inserted": False, "reason": exclusion}]
     if scan_paused(conn):
+        from xiaomao.activity import record_checks
+        record_checks(conn, project, [{"status": "paused"}], started)
         _record_scan_run(
             conn,
             project_id=project_id,
@@ -544,9 +578,12 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
             last_safe_error="scan_paused",
         )
         return [{"project": project_id, "status": "paused", "inserted": False}]
-    scan_scope_sha256 = scope_identity(project)
+    import copy
+    registered = copy.copy(project)
+    registered.worktrees = getattr(project, "_registered_worktrees", project.worktrees)
+    scan_scope_sha256 = scope_identity(registered)
     results: list[dict] = []
-    for wt in project.worktrees:
+    for wt in registered.worktrees:
         if not wt.scan:
             continue
         results.append(scan_worktree(conn, cfg, project, wt))
@@ -577,6 +614,12 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
     # Supplementary observation. Recorded separately so the registered scope,
     # its scan_run outcome and handoff coverage stay exactly as before.
     extra = scan_prefix_worktrees(conn, cfg, project) if outcome != "skip" else []
+    if outcome != "skip":
+        registered_ids = {w.worktree_id for w in registered.worktrees}
+        for wt in project.worktrees:
+            if wt.worktree_id not in registered_ids and wt.scan:
+                extra.append(scan_worktree(conn, cfg, project, wt,
+                                           expect_common_dir=getattr(wt, "_expected_common_dir", None)))
     if extra:
         insert_event(
             conn,
@@ -590,11 +633,15 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
                 ],
             },
         )
+    from xiaomao.activity import record_checks
+    record_checks(conn, project, results + extra, utc_now())
     return results + extra
 
 
 def scan_authorized(conn, cfg: AppConfig, project_id: str | None = None) -> dict[str, list[dict]]:
     """Scan one project, or every project in the allow-list."""
+    from xiaomao.inventory import effective_config
+    cfg = effective_config(cfg)
     if project_id:
         return {project_id: scan_project(conn, cfg, project_id)}
     return {project.project_id: scan_project(conn, cfg, project.project_id) for project in cfg.projects}
