@@ -199,6 +199,141 @@ class CollectTests(unittest.TestCase):
         self.assertIn(str(extra.resolve()), result["discovered_unauthorized"])
         self.assertEqual({row["worktree_id"] for row in scan_flags}, {"t-main"})
 
+    def _prefix_fixture(self):
+        import shutil
+
+        root = self._tmp()
+        repo = init_repo(root / "repo")
+        side = root / "tmpwt" / "p1"
+        other = root / "tmpwt" / "misc"
+        loose = root / "tmpwt" / "loose"
+        git(repo, "worktree", "add", "-b", "codex/p1-supervisor", str(side))
+        git(repo, "worktree", "add", "-b", "scratch", str(other))
+        git(repo, "worktree", "add", "--detach", str(loose))
+        home = root / "home"
+        cfg, project, wt = _cfg(home, repo)
+        project.branch_prefixes = ["codex/"]
+        return root, repo, side, other, loose, home, cfg, project, shutil
+
+    def test_branch_prefix_tree_is_observed_without_changing_scope(self) -> None:
+        from xiaomao.collect import PREFIX_WORKTREE_NOTE, prefix_worktree_id, scan_project
+
+        root, repo, side, other, loose, home, cfg, project, _ = self._prefix_fixture()
+        scope_before = scope_identity(project)
+        (side / "work.txt").write_text("wip\n", encoding="utf-8")
+        with open_db(home / "xiaomao.sqlite") as conn:
+            results = scan_project(conn, cfg, "t")
+            trees = {r["worktree_id"]: dict(r) for r in conn.execute("SELECT * FROM worktrees")}
+            run = conn.execute("SELECT outcome FROM scan_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+            ev = conn.execute(
+                "SELECT payload_json FROM events WHERE kind='scan_success' ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            discovered = {r["path"]: r["authorized"] for r in conn.execute("SELECT * FROM discovered_worktrees")}
+        side_id = prefix_worktree_id("t", str(side))
+        self.assertEqual(run["outcome"], "success")
+        self.assertIn(side_id, trees)
+        self.assertEqual(trees[side_id]["notes"], PREFIX_WORKTREE_NOTE)
+        # Non-matching branch and detached tree are not observed.
+        self.assertEqual(set(trees), {"t-main", side_id})
+        prefix_row = next(r for r in results if r["worktree_id"] == side_id)
+        self.assertEqual(prefix_row["branch"], "codex/p1-supervisor")
+        self.assertTrue(prefix_row["inserted"])
+        # Registered scope and the scan-run coverage proof are unchanged.
+        self.assertEqual(scope_identity(project), scope_before)
+        self.assertEqual(
+            [o["worktree_id"] for o in json.loads(ev["payload_json"])["observation_ids"]], ["t-main"]
+        )
+        self.assertEqual(project.worktrees[0].worktree_id, "t-main")
+        self.assertEqual(len(project.worktrees), 1)
+        self.assertTrue(discovered[str(side.resolve())])
+        self.assertFalse(discovered[str(other.resolve())])
+        # Same path keeps the same id; an unchanged second scan inserts nothing.
+        with open_db(home / "xiaomao.sqlite") as conn:
+            again = scan_project(conn, cfg, "t")
+        self.assertFalse(next(r for r in again if r["worktree_id"] == side_id)["inserted"])
+
+    def test_removed_prefix_tree_is_gone_not_error(self) -> None:
+        from xiaomao.collect import prefix_worktree_id, scan_project
+
+        root, repo, side, other, loose, home, cfg, project, shutil = self._prefix_fixture()
+        with open_db(home / "xiaomao.sqlite") as conn:
+            scan_project(conn, cfg, "t")
+        side_id = prefix_worktree_id("t", str(side))
+        # Directory deleted without `git worktree remove`: entry becomes prunable.
+        shutil.rmtree(side)
+        with open_db(home / "xiaomao.sqlite") as conn:
+            results = scan_project(conn, cfg, "t")
+            run = conn.execute("SELECT outcome FROM scan_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+            row = conn.execute("SELECT scan_enabled FROM worktrees WHERE worktree_id=?", (side_id,)).fetchone()
+            gone = conn.execute("SELECT payload_json FROM events WHERE kind='worktree_gone'").fetchall()
+            errors = conn.execute(
+                "SELECT COUNT(*) AS n FROM observations WHERE worktree_id=? AND collection_status='error'",
+                (side_id,),
+            ).fetchone()["n"]
+        self.assertEqual(run["outcome"], "success")
+        self.assertEqual(next(r for r in results if r["worktree_id"] == side_id)["status"], "gone")
+        self.assertEqual(row["scan_enabled"], 0)
+        self.assertEqual(len(gone), 1)
+        self.assertEqual(errors, 0)
+        # Already gone: a later scan does not emit it again.
+        with open_db(home / "xiaomao.sqlite") as conn:
+            scan_project(conn, cfg, "t")
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) AS n FROM events WHERE kind='worktree_gone'").fetchone()["n"], 1
+            )
+
+    def test_daily_lists_prefix_tree_branch(self) -> None:
+        from xiaomao.collect import scan_project
+        from xiaomao.reports import render_daily
+
+        root, repo, side, other, loose, home, cfg, project, _ = self._prefix_fixture()
+        (side / "work.txt").write_text("wip\n", encoding="utf-8")
+        with open_db(home / "xiaomao.sqlite") as conn:
+            scan_project(conn, cfg, "t")
+            text = render_daily(cfg, conn, date="2026-10-01")
+        self.assertIn("其他工作树（分支前缀 codex/", text)
+        self.assertIn("codex/p1-supervisor", text)
+        self.assertIn("未提交 1", text)
+        self.assertNotIn("scratch", text)
+
+    def test_no_prefixes_means_no_extra_trees(self) -> None:
+        from xiaomao.collect import scan_project
+
+        root, repo, side, other, loose, home, cfg, project, _ = self._prefix_fixture()
+        project.branch_prefixes = []
+        with open_db(home / "xiaomao.sqlite") as conn:
+            results = scan_project(conn, cfg, "t")
+            ids = {r["worktree_id"] for r in conn.execute("SELECT worktree_id FROM worktrees")}
+        self.assertEqual(ids, {"t-main"})
+        self.assertEqual([r["worktree_id"] for r in results], ["t-main"])
+
+    def test_prefix_tree_reappearing_under_excluded_name_is_refused(self) -> None:
+        from xiaomao.collect import scan_project
+
+        root = self._tmp()
+        repo = init_repo(root / "repo")
+        bad = root / "theaiapp-service-copy"
+        git(repo, "worktree", "add", "-b", "codex/x", str(bad))
+        home = root / "home"
+        cfg, project, wt = _cfg(home, repo)
+        project.branch_prefixes = ["codex/"]
+        with open_db(home / "xiaomao.sqlite") as conn:
+            results = scan_project(conn, cfg, "t")
+            ids = {r["worktree_id"] for r in conn.execute("SELECT worktree_id FROM worktrees")}
+        self.assertEqual(ids, {"t-main"})
+        self.assertEqual([r["worktree_id"] for r in results], ["t-main"])
+
+    def test_branch_prefixes_round_trip_config(self) -> None:
+        root = self._tmp()
+        home = root / "home"
+        repo = init_repo(root / "repo")
+        cfg, project, wt = _cfg(home, repo)
+        project.branch_prefixes = ["codex/", "claude/"]
+        home.mkdir(parents=True)
+        save_config(cfg)
+        loaded = load_config(home)
+        self.assertEqual(loaded.project("t").branch_prefixes, ["codex/", "claude/"])
+
     def test_out_of_tree_symlink_is_listed_not_followed_as_content(self) -> None:
         root = self._tmp()
         repo = init_repo(root / "repo")

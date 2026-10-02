@@ -44,6 +44,34 @@ def _facts_changed(row) -> bool:
     ) > 0
 
 
+def prefix_tree_rows(conn, project) -> list:
+    """Latest observation of each live branch-prefix tree. Supplementary only:
+    these trees are not part of the registered scope or handoff coverage."""
+    from xiaomao.collect import PREFIX_WORKTREE_NOTE
+
+    if not project.branch_prefixes:
+        return []
+    return list(
+        conn.execute(
+            """
+            SELECT w.worktree_id, w.canonical_path, o.observation_id, o.observed_at_utc,
+                   o.head_oid, o.branch_ref, o.collection_status,
+                   o.staged_count, o.unstaged_count, o.untracked_count,
+                   json_extract(o.facts_json, '$.last_commit_at') AS last_commit_at
+            FROM worktrees w
+            LEFT JOIN observations o ON o.observation_id = (
+              SELECT observation_id FROM observations
+              WHERE worktree_id = w.worktree_id AND project_id = w.project_id
+              ORDER BY observed_at_utc DESC, rowid DESC LIMIT 1
+            )
+            WHERE w.project_id = ? AND w.notes = ? AND w.scan_enabled = 1
+            ORDER BY o.branch_ref
+            """,
+            (project.project_id, PREFIX_WORKTREE_NOTE),
+        )
+    )
+
+
 def render_daily(cfg: AppConfig, conn, *, date: str, model_note: str | None = None) -> str:
     lines: list[str] = []
     lines.append(f"小猫日报 {date}")
@@ -135,6 +163,20 @@ def render_daily(cfg: AppConfig, conn, *, date: str, model_note: str | None = No
                 lines.append("  变化：相对上次指纹，工作区 clean（仅磁盘可见状态）")
             lines.append("  测试：unknown（本版本不执行业务仓测试，也未接入授权报告）")
             lines.append("  部署：unknown（本版本无远程连接器）")
+        extra = [r for r in prefix_tree_rows(conn, project) if r["observation_id"]]
+        if extra:
+            lines.append(f"其他工作树（分支前缀 {', '.join(project.branch_prefixes)}；补充观察，不计入交接范围）：")
+            for row in extra:
+                branch = (row["branch_ref"] or "").removeprefix("refs/heads/") or "?"
+                dirty = int(row["staged_count"] or 0) + int(row["unstaged_count"] or 0) + int(row["untracked_count"] or 0)
+                state = f"未提交 {dirty}" if dirty else "clean"
+                if row["collection_status"] != "ok":
+                    state = f"采集 {row['collection_status']}"
+                last = row["last_commit_at"] or "?"
+                lines.append(f"  - {branch} @ {_short(row['head_oid'])} · 最近提交 {last} · {state}")
+                verified.append(f"{project.project_id} 分支 {branch} HEAD {_short(row['head_oid'])}（前缀树）")
+                if dirty:
+                    any_change = True
         idle = [r for r in rows if not r["scan_enabled"]]
         if idle:
             names = ", ".join(r["worktree_id"] for r in idle)

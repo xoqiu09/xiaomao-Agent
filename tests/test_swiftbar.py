@@ -12,6 +12,9 @@ from zoneinfo import ZoneInfo
 from xiaomao.store import SCHEMA, utc_now
 from xiaomao.swiftbar import (
     STALE_AFTER_S,
+    _alerts,
+    _dirty_inventory,
+    _tree_label,
     file_href,
     latest_daily,
     relative_zh,
@@ -136,6 +139,51 @@ def _insert_obs(
 
 
 class SwiftbarTests(unittest.TestCase):
+    def test_branch_prefix_tree_labels_use_project_and_branch(self) -> None:
+        row = {
+            "worktree_id": "website~deadbeef00",
+            "project_id": "website",
+            "notes": "branch_prefix",
+            "branch_ref": "refs/heads/codex/tree-prefix",
+        }
+        self.assertEqual(_tree_label(row), "website · codex/tree-prefix")
+
+    def test_branch_prefix_dirty_inventory_uses_human_tree_label(self) -> None:
+        state = {
+            "worktrees": [{
+                "worktree_id": "website~deadbeef00",
+                "project_id": "website",
+                "notes": "branch_prefix",
+                "branch_ref": "refs/heads/codex/tree-prefix",
+                "scan_enabled": 1,
+                "staged_count": 1,
+                "unstaged_count": 2,
+                "untracked_count": 1,
+                "facts_json": json.dumps({"unstaged": ["src/swiftbar.py"]}),
+            }],
+        }
+        self.assertEqual(
+            _dirty_inventory(state, set()),
+            ["website · codex/tree-prefix 未提交（staged 1 / unstaged 2 / untracked 1）　swiftbar.py"],
+        )
+
+    def test_branch_prefix_collection_error_alert_uses_human_tree_label(self) -> None:
+        state = {
+            "db_ok": True,
+            "worktrees": [{
+                "worktree_id": "website~deadbeef00",
+                "project_id": "website",
+                "notes": "branch_prefix",
+                "branch_ref": "refs/heads/codex/tree-prefix",
+                "scan_enabled": 1,
+                "collection_status": "error",
+            }],
+        }
+        self.assertEqual(
+            _alerts(state, stale=False),
+            ["website · codex/tree-prefix 采集状态：error"],
+        )
+
     def test_relative_zh(self) -> None:
         self.assertEqual(relative_zh(10), "刚刚")
         self.assertEqual(relative_zh(180), "3 分钟前")
