@@ -42,6 +42,11 @@ class ProjectSpec:
     # scanned and still reported in the daily. Collection errors are never
     # hidden — only the uncommitted-work inventory in the SwiftBar menu.
     menu_hide_dirty: bool = False
+    # Opt-in: other worktrees of the main tree's repository whose branch
+    # (refs/heads/<name>) starts with one of these prefixes are observed for
+    # the current scan only. Empty = no extra trees. Never written back as
+    # registrations; a tree that disappears is recorded as gone, not error.
+    branch_prefixes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -193,6 +198,7 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
                 "approved_root": p.approved_root,
                 "report_dirs": p.report_dirs,
                 "menu_hide_dirty": p.menu_hide_dirty,
+                "branch_prefixes": p.branch_prefixes,
                 "worktrees": [
                     {
                         "worktree_id": w.worktree_id,
@@ -220,6 +226,7 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
                 report_dirs=list(p.get("report_dirs") or []),
                 # Absent in older configs: quieting is opt-in, never inferred.
                 menu_hide_dirty=bool(p.get("menu_hide_dirty", False)),
+                branch_prefixes=[str(x) for x in (p.get("branch_prefixes") or []) if str(x).strip()],
                 worktrees=[
                     WorktreeSpec(
                         worktree_id=w["worktree_id"],

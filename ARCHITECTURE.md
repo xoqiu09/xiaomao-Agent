@@ -22,7 +22,7 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
 | 路径 | 职责 |
 | --- | --- |
 | `src/xiaomao/config.py`, `scope.py` | 登记与读取边界；缺省清单不等于自动发现授权 |
-| `collect.py`, `git_readonly.py` | 项目扫描、状态指纹、历史状态重现、每次扫描实际覆盖证明 |
+| `collect.py`, `git_readonly.py` | 项目扫描、状态指纹、历史状态重现、每次扫描实际覆盖证明；`branch_prefixes` 补充观察同仓其他工作树（不进范围证明） |
 | `store.py` | SQLite schema、观察 / 证据 / 事件；同秒观察按插入顺序确定最新 |
 | `render.py`, `reports.py` | 核对不可变来源后才加载事实，当前启用范围驱动正文 |
 | `handoff_view.py` | 交接文件哈希、范围、观察 ID、扫描覆盖、时间和最新失败校验 |
@@ -45,6 +45,7 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
 
 ## 需要保留的不变量
 
+- 分支前缀树是补充观察：id 由真实路径哈希得出，`notes=branch_prefix`；不进入 `scope_identity`、`scan_runs` 结果和交接覆盖。消失记 `worktree_gone`，不记 error。
 - 观察 A → B → A 要记录 A 再次出现，不得因指纹历史唯一约束误复用 B；下一次 A 再扫描才幂等。旧行不覆盖。
 - 只读查询不运行 schema 迁移或模型；SQLite 的协调副文件与应用记录写入区分。
 - 默认无外发通道。模型只得到经过范围过滤的事实，没有工具权限。
