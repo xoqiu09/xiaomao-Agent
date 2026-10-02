@@ -387,12 +387,12 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def write_daily_briefing(cfg, bundle, notes) -> Path:
     """Use the exact daily packet and validated notes; do not rescan or infer."""
-    from xiaomao.daily import project_lines
+    from xiaomao.feature_daily import feature_records, record_sentence
     from xiaomao.report_access import bind_report
     today = []
     for project in bundle["projects"]:
         note = notes.get(project["repo_id"], {})
-        bullets = note.get("bullets") or project_lines(project)
+        bullets = [record_sentence(r) for r in feature_records(project, note) if r["today"]]
         if not project["changed"]:
             if project["ongoing"]:
                 today.append(f"{project['display_name']}：有遗留未提交工作，未观察到新增变化。")
@@ -402,7 +402,7 @@ def write_daily_briefing(cfg, bundle, notes) -> Path:
     today.insert(0, f"日报窗口 {bundle['window']['date']} · {bundle['window']['timezone']} · "
                     f"{'部分覆盖，详见采集缺口' if bundle['coverage'] == 'partial' else '完整覆盖'}")
     text = render_menu_briefing(today, ["本日报只汇总所示窗口；历史活跃度未重新判断。"],
-                               model_used=any(n.get("bullets") for n in notes.values()))
+                               model_used=any(n.get("accepted") for n in notes.values()))
     dest = menu_path(cfg, bundle["window"]["date"])
     dest.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(dest, text)

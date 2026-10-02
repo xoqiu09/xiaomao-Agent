@@ -35,6 +35,7 @@ def bind_report(path: Path, text: str, cfg: AppConfig, kind: str, project_id: st
     if daily_bundle is not None:
         meta.update(window=daily_bundle["window"], evidence_version=daily_bundle["schema"],
                     evidence_hash=daily_bundle["evidence_hash"], coverage=daily_bundle["coverage"],
+                    interpretation_hash=daily_bundle.get("interpretation_hash"),
                     projects=[{"project_id": p["project_id"], "repo_id": p["repo_id"], "trees": p["trees"]}
                               for p in daily_bundle["projects"]])
     # A concurrent reader can see a mismatched pair, which fails closed.
@@ -46,7 +47,7 @@ def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project
     expected = scope_set(cfg, project_id)
     if not expected:
         raise ValueError("没有可读取的授权范围")
-    folder_name = {"status": "projects", "briefing": "briefing"}.get(kind, "daily")
+    folder_name = {"status": "projects", "briefing": "briefing", "daily-evidence": "daily-evidence"}.get(kind, "daily")
     folder = home / "reports" / folder_name
     if folder.resolve() != home.resolve() / "reports" / folder.name:
         raise ValueError("报告目录越出数据 home")
@@ -57,4 +58,24 @@ def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project
     body = _read_file(path, folder, 2 * 1024 * 1024)
     if hashlib.sha256(body).hexdigest() != meta.get("sha256"):
         raise ValueError("报告来源校验失败")
+    if kind == "briefing" and meta.get("window"):
+        from datetime import date
+        day = date.fromisoformat(meta["window"]["date"]).isoformat()
+        main_path = home / "reports/daily" / (day + ".txt")
+        read_bound_report(main_path, home, cfg, "daily")
+        main = json.loads(_read_file(main_path.with_suffix(".json"), main_path.parent, 128 * 1024))
+        if any(main.get(k) != meta.get(k) for k in ("window", "evidence_hash", "interpretation_hash")):
+            raise ValueError("菜单与日报版本不一致")
     return body.decode("utf-8")
+
+
+def read_daily_details(path: Path, home: Path, cfg: AppConfig) -> tuple[Path, str]:
+    from xiaomao.feature_render import details_path
+    read_bound_report(path, home, cfg, "daily")
+    dest = details_path(home, path.stem)
+    body = read_bound_report(dest, home, cfg, "daily-evidence")
+    main = json.loads(_read_file(path.with_suffix(".json"), path.parent, 128 * 1024))
+    extra = json.loads(_read_file(dest.with_suffix(".json"), dest.parent, 128 * 1024))
+    if any(main.get(k) != extra.get(k) for k in ("window", "evidence_hash", "interpretation_hash")):
+        raise ValueError("日报与依据版本不一致")
+    return dest, body

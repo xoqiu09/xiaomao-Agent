@@ -41,7 +41,12 @@ def _content_key(row):
     return tuple(row.get(k) for k in ("content_hash", "index_hash", "status", "availability"))
 
 
+def _event_order(event):
+    return event["at"], event.get("sequence", 0)
+
+
 def _activity(previous, state, row):
+    from xiaomao.feature_evidence import observed_delta
     before, after = _file_map(previous), _file_map(state)
     paths = sorted(p for p in before.keys() | after.keys()
                    if _content_key(before.get(p, {})) != _content_key(after.get(p, {})))
@@ -57,9 +62,14 @@ def _activity(previous, state, row):
         kind = "workspace"
     return {
         "evidence_id": row["sample_id"], "tree_id": row["tree_id"], "at": row["at_utc"],
+        "sequence": row["sample_order"],
         "kind": kind, "paths": paths,
-        "files": [dict(after.get(p) or before.get(p) or {"path": p}) for p in paths],
+        "files": [observed_delta(before.get(p, {}), after[p], p) if p in after
+                  else dict(before.get(p) or {"path": p},
+                            resolution_kind="restored" if previous.get("head") == state.get("head") else "resolved")
+                  for p in paths],
         "head": state.get("head"), "before_head": previous.get("head"),
+        "context_version": state.get("feature_context", {}).get("version"),
     }
 
 
@@ -69,6 +79,7 @@ def _group(project, repo_id):
         "aliases": [project.project_id], "repo_id": repo_id, "trees": [],
         "commits": [], "activity": [], "ongoing": [], "gaps": [], "limitations": [],
         "evidence_ids": [], "changed": False,
+        "feature_contexts": {},
     }
 
 
@@ -141,7 +152,7 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
                     continue
             eligible_trees.append(tree)
             samples = list(conn.execute(
-                "SELECT * FROM daily_samples WHERE scope_key=? AND tree_id=? AND repo_id=? AND at_utc<? "
+                "SELECT rowid AS sample_order,* FROM daily_samples WHERE scope_key=? AND tree_id=? AND repo_id=? AND at_utc<? "
                 "ORDER BY at_utc,rowid", (key, tree["tree_id"], repo_id, end.isoformat()),
             ))
             if not samples:
@@ -149,6 +160,9 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             previous = None
             for row in samples:
                 state = json.loads(row["state_json"])
+                context = state.get("feature_context")
+                if context:
+                    group["feature_contexts"][context["version"]] = context
                 if start.isoformat() <= row["at_utc"] and previous is not None and not row["baseline"]:
                     event = _activity(previous, state, row)
                     if event:
@@ -162,7 +176,10 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
                 "last_seen": samples[-1]["at_utc"], "status": state.get("status"),
             })
             if state.get("files") and not state.get("gone"):
-                group["ongoing"].append(dict(state, tree_id=tree["tree_id"]))
+                group["ongoing"].append(dict(state, tree_id=tree["tree_id"],
+                    evidence_id="ongoing:" + samples[-1]["sample_id"], at=samples[-1]["at_utc"],
+                    sequence=samples[-1]["sample_order"],
+                    context_version=state.get("feature_context", {}).get("version")))
             if samples[0]["at_utc"] >= start.isoformat():
                 group["gaps"].append(f"{tree['tree_id']}: 首次观察只建立基线")
             commits = conn.execute("""
@@ -173,6 +190,10 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             """, (key, tree["tree_id"], repo_id, start.isoformat(), end.isoformat()))
             for row in commits:
                 facts = json.loads(row["payload_json"])
+                context = facts.pop("feature_context", None)
+                if context:
+                    group["feature_contexts"][context["version"]] = context
+                    facts["context_version"] = context["version"]
                 prior = next((c for c in group["commits"] if c["sha"] == facts["sha"]), None)
                 if prior is not None:
                     prior["first_seen"] = min(prior["first_seen"], row["first_seen"])
@@ -201,11 +222,13 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             group["gaps"].append(f"{payload.get('worktree_id')}: 日报证据采集失败")
     for group in groups.values():
         group["commits"].sort(key=lambda c: (c["effective_at"], c["sha"]))
-        group["activity"].sort(key=lambda a: (a["at"], a["evidence_id"]))
-        group["evidence_ids"] = [x["evidence_id"] for x in group["commits"] + group["activity"]]
+        group["activity"].sort(key=_event_order)
+        group["evidence_ids"] = [x["evidence_id"] for x in group["commits"] + group["activity"] + group["ongoing"]]
         group["changed"] = bool(group["commits"] or group["activity"])
         group["gaps"] = list(dict.fromkeys(group["gaps"]))
         group["limitations"] = list(dict.fromkeys(group["limitations"]))
+        used_contexts = {e.get("context_version") for e in group["commits"] + group["activity"] + group["ongoing"]}
+        group["feature_contexts"] = {k: v for k, v in group["feature_contexts"].items() if k in used_contexts}
         # Link an observed edit to a commit only when the stored content hash agrees.
         for event in group["activity"]:
             event["covered_by_commits"] = sorted({
@@ -219,11 +242,21 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             event["followed_by_restore"] = next((
                 later["evidence_id"] for later in group["activity"]
                 if event["kind"] == "workspace" and later["kind"] == "restored"
-                and later["tree_id"] == event["tree_id"] and later["at"] >= event["at"]
+                and later["tree_id"] == event["tree_id"] and _event_order(later) > _event_order(event)
                 and later["head"] == event["head"] and set(event["paths"]) <= set(later["paths"])
             ), None)
+            for file in event["files"]:
+                file["covered_by_commits"] = sorted({c["sha"] for c in group["commits"]
+                    if event["at"] <= c["first_seen"] and file.get("content_hash") and any(
+                        f["path"] == file["path"] and f.get("content_hash") == file["content_hash"] for f in c["files"])})
+                file["followed_by_restore"] = next((later["evidence_id"] for later in group["activity"]
+                    if event["kind"] == "workspace" and not file.get("resolution_kind")
+                    and later["tree_id"] == event["tree_id"] and _event_order(later) > _event_order(event)
+                    and later["head"] == event["head"] and any(
+                        f["path"] == file["path"] and (later["kind"] == "restored" or f.get("resolution_kind") == "restored")
+                        for f in later["files"])), None)
     packet = {
-        "schema": "xiaomao-daily-evidence-v1", "scope": scope_set(cfg),
+        "schema": "xiaomao-daily-evidence-v2", "scope": scope_set(cfg),
         "window": {"date": date, "key": window_key(cfg, date), "timezone": cfg.timezone,
                    "start": start.isoformat(), "end": end.isoformat()},
         "generated_at": now.isoformat(), "preview": now < end,
@@ -259,7 +292,7 @@ def project_lines(project) -> list[str]:
     return lines
 
 
-def render_bundle(bundle: dict, notes: dict | None = None) -> str:
+def render_evidence(bundle: dict, notes: dict | None = None) -> str:
     notes = notes or {}
     window = bundle["window"]
     tz = ZoneInfo(window["timezone"])
@@ -330,9 +363,14 @@ def render_bundle(bundle: dict, notes: dict | None = None) -> str:
     lines.extend("- " + e for e in bundle["inventory_errors"])
     lines.extend(["- 两次采集之间改动又撤销、未保存到磁盘的编辑不可见。",
                   "- 测试：unknown；部署：unknown。", "", "模型解读", "--------"])
-    if not any(n.get("bullets") for n in notes.values()):
+    if not any(n.get("accepted") for n in notes.values()):
         lines.append("本报告由规则程序生成，未获得有效的模型解读。" if notes
                      else "本报告由规则程序生成，没有调用本地模型。")
     else:
         lines.append("各项目短句含本地模型解读，技术事实保持来源引用。")
     return "\n".join(lines) + "\n"
+
+
+def render_bundle(bundle: dict, notes: dict | None = None) -> str:
+    from xiaomao.feature_render import render_summary
+    return render_summary(bundle, notes or {})

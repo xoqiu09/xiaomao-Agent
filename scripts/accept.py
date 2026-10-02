@@ -256,7 +256,8 @@ def isolated_checks(root: Path, env: dict[str, str], report: dict) -> None:
     for kind in ("daily", "handoff"):
         args = [kind] if kind == "daily" else [kind, "--project", PROJECT]
         generated = run([*cli, *args], env=env)
-        evidence = report_evidence(generated, home / "reports" / kind, required)
+        summary_required = ("各项目功能变化", "仍在推进的功能", "待确认与采集缺口", *required[2:])
+        evidence = report_evidence(generated, home / "reports" / kind, summary_required if kind == "daily" else required)
         latest = run([*cli, "latest", kind, "--project", PROJECT], env=env)
         latest_lines = latest.stdout.strip().splitlines()
         if kind == "handoff":
@@ -265,6 +266,14 @@ def isolated_checks(root: Path, env: dict[str, str], report: dict) -> None:
                               and "资料状态：交接可读" in latest.stdout)
         else:
             latest_matches = latest.returncode == 0 and bool(latest_lines) and latest_lines[0] == evidence.get("path")
+            details = run([*cli, "latest", "daily", "--details", "--print"], env=env)
+            detail_lines = details.stdout.splitlines()
+            detail_path = Path(detail_lines[0]) if detail_lines else None
+            details_valid = (details.returncode == 0 and detail_path is not None
+                             and detail_path.parent.resolve() == (home / "reports/daily-evidence").resolve()
+                             and all(fragment in details.stdout for fragment in required))
+            evidence["details"] = dict(command_evidence(details), valid=details_valid)
+            evidence["valid"] = evidence["valid"] and details_valid
         gate(report, kind, evidence["valid"] and latest_matches and not errors,
              generated=evidence, latest=command_evidence(latest), latest_matches=latest_matches,
              scan_prerequisite_passed=not errors)

@@ -76,7 +76,7 @@ def render_daily(cfg: AppConfig, conn, *, date: str, model_note: str | None = No
     from xiaomao.daily import build_bundle, render_bundle
     body = render_bundle(build_bundle(cfg, conn, date=date))
     if model_note:
-        body += "\n附加解读：\n" + model_note + "\n"
+        body += "\n附加解读未绑定本窗口证据，未纳入正文。\n"
     return body
 
 
@@ -104,16 +104,17 @@ def write_daily(
     dest = daily_path(cfg, date)
     dest.parent.mkdir(parents=True, exist_ok=True)
     text = render_bundle(bundle)
+    from xiaomao.feature_render import write_details
+    write_details(cfg, bundle, {})
     if model_note:
-        text += "\n附加解读：\n" + model_note + "\n"
+        text += "\n附加解读未绑定本窗口证据，未纳入正文。\n"
     preserve_report(dest, text)
     _atomic_write(dest, text)
     from xiaomao.report_access import bind_report
 
     bind_report(dest, text, cfg, "daily", daily_bundle=bundle)
-    if model_ok and model_note:
-        daily_model_path(cfg, date).write_text(text, encoding="utf-8")
-        bind_report(daily_model_path(cfg, date), text, cfg, "daily")
+    # The legacy model_ok flag does not authorize unstructured model prose.
+    # Structured daily interpretation is published only by daily_jobs.run_daily.
     return dest
 
 

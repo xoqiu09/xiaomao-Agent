@@ -535,6 +535,12 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     daily_stamp = _daily_stamp(daily, tz, now_local)
     if daily_verified:
         lines.append(f"打开日报 {_escape(daily.stem)}　{_escape(daily_stamp)} | href={file_href(daily)}")
+        try:
+            from xiaomao.report_access import read_daily_details
+            evidence, _ = read_daily_details(daily, home, cfg)
+            lines.append(f"查看日报依据 | href={file_href(evidence)}")
+        except (ValueError, OSError):
+            lines.append("日报依据尚未生成或版本未核实")
     elif daily is not None:
         lines.append(f"最新日报范围未核实（旧文件保留，需重新生成）　{_escape(daily_stamp)}")
     else:
