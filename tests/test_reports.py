@@ -245,7 +245,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         report = backup_sqlite(src, dest)
         self.assertEqual(report["integrity"], "ok")
         con = sqlite3.connect(dest)
-        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "4")
+        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "5")
         self.assertEqual(con.execute("SELECT value FROM meta WHERE key='probe'").fetchone()[0], "1")
         con.close()
         with self.assertRaises(FileExistsError):
