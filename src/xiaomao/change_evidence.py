@@ -22,7 +22,7 @@ MAX_FILES = 200
 MAX_PATCH_CHARS = 2000
 MAX_TOTAL_CHARS = 64 * 1024
 _ASSIGNMENT = re.compile(
-    r"(?im)^.*\b(?:api[_-]?key|secret|token|password|passwd|credential)\b"
+    r"(?im)^.*(?:api[_-]?key|secret|token|password|passwd|credential|private[_-]?key|mnemonic|seed[_-]?phrase)[\w-]*"
     r"""["']?\s*[:=].*$"""
 )
 
@@ -146,7 +146,8 @@ def workspace_evidence(repo: Path, entries: list, head: str | None) -> tuple[lis
             continue
         before, before_state = blob_text(repo, head, rel)
         index, index_state = ("", "absent") if entry.is_untracked else blob_text(repo, "", rel)
-        item.update(content_hash=digest(text), index_hash=digest(index), availability=state)
+        item.update(content_hash=digest(text), index_hash=digest(index), before_hash=digest(before),
+                    before_index_hash=digest(before), availability=state)
         snippets = []
         if before is not None and text is not None:
             snippets.append(patch_text(before, text, rel))
@@ -155,6 +156,11 @@ def workspace_evidence(repo: Path, entries: list, head: str | None) -> tuple[lis
         excerpt = "\n".join(part for part in snippets if part)
         item["patch"] = excerpt[:remaining]
         remaining -= len(item["patch"])
+        if before is not None and text is not None:
+            from xiaomao.feature_evidence import fit_evidence
+            remaining = fit_evidence(item, before, text, remaining, index=index)
+            if item.get("units_truncated"):
+                limitations.append(f"{rel}: context_truncated")
         if len(excerpt) > len(item["patch"]) or "[truncated]" in excerpt:
             limitations.append(f"{rel}: diff_truncated")
         for reason in (before_state, index_state):
@@ -189,10 +195,14 @@ def commit_evidence(repo: Path, oid: str) -> dict:
             row["availability"] = f"{bs}/{als}"
             limitations.append(f"{rel}: {bs}/{als}")
             continue
-        row.update(availability="ok", content_hash=digest(after))
+        row.update(availability="ok", content_hash=digest(after), before_hash=digest(before))
         excerpt = patch_text(before, after, rel)
         row["patch"] = excerpt[:remaining]
         remaining -= len(row["patch"])
+        from xiaomao.feature_evidence import fit_evidence
+        remaining = fit_evidence(row, before, after, remaining, layer="commit")
+        if row.get("units_truncated"):
+            limitations.append(f"{rel}: context_truncated")
         if len(excerpt) > len(row["patch"]) or "[truncated]" in excerpt:
             limitations.append(f"{rel}: diff_truncated")
     if len(paths) > MAX_FILES:

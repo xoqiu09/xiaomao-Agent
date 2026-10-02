@@ -16,7 +16,8 @@ from xiaomao.store import open_db
 EXPECTED = {
     "projects": 3, "trees": 5, "new_commits": 1, "ongoing_trees": 2,
     "changed_projects": ["website", "notes"], "candidates": 1,
-    "must_include": ["新增重试恢复", "xiaomao-test", "draft.py", "尚未提交的工作", "采集缺口"],
+    "must_include": ["xiaomao-test", "仍在推进的功能", "各项目功能变化", "待确认与采集缺口"],
+    "detail_must_include": ["新增重试恢复", "draft.py", "其他工作树", "合并叙述"],
     "must_exclude": ["AFTER_CUTOFF_ONLY", "UNKNOWN_SOURCE_MUST_NOT_BE_READ"],
 }
 
@@ -77,6 +78,11 @@ def generate(root: Path) -> tuple[dict, str, dict]:
         assert value == EXPECTED[key], (key, value, EXPECTED[key])
     for text in EXPECTED["must_include"]:
         assert text in body, text
+    from xiaomao.feature_render import render_details
+    detail = render_details(bundle, {})
+    for text in EXPECTED["detail_must_include"]:
+        assert text in detail, text
+    assert "draft.py" not in body
     for text in EXPECTED["must_exclude"]:
         assert text not in json.dumps(bundle, ensure_ascii=False), text
     assert any(e["kind"] == "restored" for p in bundle["projects"] for e in p["activity"])

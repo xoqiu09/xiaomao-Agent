@@ -211,7 +211,8 @@ def scan_worktree(
         }
     from xiaomao.ops import storage_over_budget
     if storage_over_budget(Path(cfg.home)):
-        snap.content_changes = [dict(item, patch="") for item in snap.content_changes]
+        snap.content_changes = [{k: v for k, v in dict(item, patch="").items()
+                                 if k not in {"units", "snapshot"}} for item in snap.content_changes]
         snap.evidence_limitations.append("storage_budget")
     fingerprint = snapshot_fingerprint(snap)
     last = latest_observation(conn, wt.worktree_id)

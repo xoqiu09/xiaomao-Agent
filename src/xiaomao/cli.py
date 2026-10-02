@@ -304,6 +304,11 @@ def cmd_projects(ns: argparse.Namespace) -> int:
     return projects_command(ns, _home_from_args(ns))
 
 
+def cmd_features(ns: argparse.Namespace) -> int:
+    from xiaomao.feature_commands import features_command
+    return features_command(ns, _home_from_args(ns))
+
+
 def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
     from xiaomao.briefing import ingest_authorized
 
@@ -505,6 +510,9 @@ def cmd_latest(ns: argparse.Namespace) -> int:
 
     try:
         body = read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+        if ns.kind == "daily" and getattr(ns, "details", False):
+            from xiaomao.report_access import read_daily_details
+            path, body = read_daily_details(path, home, load_config(home))
     except (OSError, ValueError):
         sys.stderr.write("旧报告范围或来源未核实；请重新生成当前授权项目的报告。\n")
         return 3
@@ -533,6 +541,9 @@ def cmd_open(ns: argparse.Namespace) -> int:
 
             try:
                 read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+                if ns.kind == "daily" and getattr(ns, "details", False):
+                    from xiaomao.report_access import read_daily_details
+                    path, _ = read_daily_details(path, home, load_config(home))
             except (OSError, ValueError):
                 sys.stderr.write("旧报告范围或来源未核实；未打开。\n")
                 return 3
@@ -685,6 +696,12 @@ def build_parser() -> argparse.ArgumentParser:
     projects.add_argument("--notify", choices=["on", "off"])
     projects.set_defaults(func=cmd_projects)
 
+    features = sub.add_parser("features", help="查看功能目录或保存中文名称及匹配规则的修正")
+    features.add_argument("action", choices=["show", "set"])
+    features.add_argument("--project", required=True)
+    features.add_argument("--file", help="set：经确认的功能目录 JSON；只保存到小猫数据目录")
+    features.set_defaults(func=cmd_features)
+
     ho = sub.add_parser("handoff", help="生成交接材料")
     ho.add_argument("--project", required=True)
     ho.add_argument("--with-model", action="store_true")
@@ -724,11 +741,13 @@ def build_parser() -> argparse.ArgumentParser:
     lat.add_argument("kind", choices=["daily", "handoff", "status"])
     lat.add_argument("--project", help="handoff 多项目时必填")
     lat.add_argument("--print", action="store_true", dest="print")
+    lat.add_argument("--details", action="store_true", help="daily：读取同一版本的完整依据")
     lat.set_defaults(func=cmd_latest)
 
     op = sub.add_parser("open", help="用系统 open 打开最新报告")
     op.add_argument("kind", choices=["daily", "handoff", "status"])
     op.add_argument("--project", help="handoff 多项目时必填")
+    op.add_argument("--details", action="store_true", help="daily：打开同一版本的完整依据")
     op.set_defaults(func=cmd_open)
 
     he = sub.add_parser("health", help="运行健康与调度状态")

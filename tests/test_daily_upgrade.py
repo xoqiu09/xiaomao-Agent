@@ -38,7 +38,10 @@ class DailyRegressionTests(unittest.TestCase):
         git(self.repo, "commit", "-m", "Fix retry recovery")
         self.scan("2026-10-02T03:00:00+00:00")
         body = render_daily(self.cfg, self.conn, date="2026-10-02")
-        self.assertIn("Fix retry recovery", body)
+        from xiaomao.feature_render import render_details
+        self.assertIn("Fix retry recovery", render_details(self.bundle(), {}))
+        self.assertIn("已提交", body)
+        self.assertNotIn("retry.py", body)
         self.assertNotIn("授权观察范围内无新变化", body)
 
     def bundle(self, date="2026-10-02"):

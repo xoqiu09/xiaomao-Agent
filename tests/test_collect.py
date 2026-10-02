@@ -284,14 +284,15 @@ class CollectTests(unittest.TestCase):
 
     def test_daily_lists_prefix_tree_branch(self) -> None:
         from xiaomao.collect import scan_project
-        from xiaomao.reports import render_daily
+        from xiaomao.daily import build_bundle
+        from xiaomao.feature_render import render_details
 
         root, repo, side, other, loose, home, cfg, project, _ = self._prefix_fixture()
         (side / "work.txt").write_text("wip\n", encoding="utf-8")
         with open_db(home / "xiaomao.sqlite") as conn:
             with patch("xiaomao.collect.utc_now", return_value="2026-10-01T12:00:00+00:00"):
                 scan_project(conn, cfg, "t")
-            text = render_daily(cfg, conn, date="2026-10-01")
+            text = render_details(build_bundle(cfg, conn, date="2026-10-01"), {})
         self.assertIn("其他工作树", text)
         self.assertIn("codex/p1-supervisor", text)
         self.assertIn("untracked 1", text)

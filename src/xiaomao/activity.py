@@ -79,6 +79,8 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
         "observation_id": observation_id, "status": snap.collection_status, "gone": False,
         "staged": len(snap.staged), "unstaged": len(snap.unstaged), "untracked": len(snap.untracked),
     }
+    from xiaomao.feature_context import snapshot_context
+    state["feature_context"] = snapshot_context(conn, cfg, project, path, observed_at)
     frontier = _frontier(path, snap.head_oid)
     known = json.loads(previous["frontier_json"]) if previous else frontier
     first_seen = previous["first_seen"] if previous else observed_at
@@ -95,11 +97,6 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
                 cached = conn.execute("SELECT payload_json FROM daily_commits WHERE repo_id=? AND sha=?",
                                       (repo_id, oid)).fetchone()
                 facts = json.loads(cached[0]) if cached else commit_evidence(path, oid)
-                if over_budget:
-                    facts = dict(facts, files=[dict(f, patch="") for f in facts["files"]])
-                    facts["limitations"] = [*facts["limitations"], "storage_budget"]
-                conn.execute("INSERT OR IGNORE INTO daily_commits VALUES (?,?,?)",
-                             (repo_id, oid, json.dumps(facts, ensure_ascii=False)))
                 effective = observed_at
                 # Old imported history belongs to its first observed window;
                 # recover recent commit time across a sampling/sleep gap.
@@ -111,6 +108,14 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
                     (repo_id, oid)).fetchone()[0]
                 if known_time:
                     effective = known_time
+                if not cached:
+                    facts["feature_context"] = snapshot_context(conn, cfg, project, path, effective, ref=oid)
+                if over_budget:
+                    facts = dict(facts, files=[{k: v for k, v in dict(f, patch="").items()
+                                               if k not in {"units", "snapshot"}} for f in facts["files"]])
+                    facts["limitations"] = [*facts["limitations"], "storage_budget"]
+                conn.execute("INSERT OR IGNORE INTO daily_commits VALUES (?,?,?)",
+                             (repo_id, oid, json.dumps(facts, ensure_ascii=False)))
                 conn.execute("INSERT OR IGNORE INTO daily_commit_links VALUES (?,?,?,?,?,?)",
                              (repo_id, oid, wt.worktree_id, key, observed_at, effective))
             if len(pending) > COMMIT_BATCH:
