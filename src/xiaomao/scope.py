@@ -20,7 +20,8 @@ _COMPANY_PREFIXES = ("theaiapp-service", "event-services-chooseme-event")
 _ARCHIVE_COMPONENT = "_待删除旧项目_2026-09-22"
 _MAX_GIT_POINTER_BYTES = 4096
 _THIRD_PARTY_COMPONENTS = frozenset(
-    ("stats", "stats.app", "agentnotch", "agentnotch.app", "tokenmonitor", "tokenmonitor.app")
+    ("stats", "stats.app", "agentnotch", "agentnotch.app", "tokenmonitor", "tokenmonitor.app",
+     "token-monitor", "token monitor.app")
 )
 # These original registrations were confirmed retired. Their compatibility
 # links no longer exist, so filesystem resolution alone cannot identify them.

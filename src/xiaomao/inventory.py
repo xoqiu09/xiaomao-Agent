@@ -182,7 +182,12 @@ def effective_config(cfg):
                     resolved = str(Path(found.path).resolve())
                     if found.bare or resolved in known or excluded(resolved) or not Path(resolved).is_dir():
                         continue
-                    target = metadata(resolved)
+                    try:
+                        target = metadata(resolved)
+                    except Exception:
+                        result._inventory_errors.append(
+                            f"{project.project_id}: {resolved}: worktree_metadata_unavailable")
+                        continue
                     if target["common_dir"] != source_meta["common_dir"]:
                         continue
                     known.add(resolved)
@@ -192,4 +197,7 @@ def effective_config(cfg):
                     project.worktrees.append(tree)
             except Exception:
                 result._inventory_errors.append(f"{project.project_id}: worktree_inventory_unavailable")
+    verified = {str(Path(w.path).resolve()) for p in result.projects
+                if not project_exclusion_reason(p) for w in p.worktrees}
+    result._inventory_candidates = [row for row in result._inventory_candidates if row["path"] not in verified]
     return result

@@ -13,8 +13,8 @@ from xiaomao.paths import ensure_layout, layout
 from xiaomao.report_access import bind_report, scope_set
 from xiaomao.store import open_db, utc_now
 
-from xiaomao.feature_daily import (PROMPT_VERSION, MODEL_SCHEMA, SYSTEM, model_packet,
-                                   validate_records)
+from xiaomao.feature_daily import (PROMPT_VERSION, SYSTEM, model_packet, prepare_inference,
+                                   inference_schema, expand_inference, validate_records)
 MAX_CATCHUP = 7
 
 
@@ -42,7 +42,8 @@ def summarize_projects(cfg, bundle, client) -> dict:
         if not project["changed"]:
             continue
         packet = _model_packet(bundle, project)
-        encoded = json.dumps(packet, ensure_ascii=False, sort_keys=True)
+        request, bindings = prepare_inference(packet, max_chars=min(48000, cfg.context_length * 2))
+        encoded = json.dumps(request, ensure_ascii=False, sort_keys=True)
         cache_key = _hash([PROMPT_VERSION, model, bundle["scope"], packet])
         with open_db(layout(Path(cfg.home))["db"]) as conn:
             cached = conn.execute("SELECT note_json FROM daily_model_cache WHERE cache_key=?",
@@ -55,15 +56,17 @@ def summarize_projects(cfg, bundle, client) -> dict:
             error = "本地模型不可用或未启用"
         elif storage_over_budget(Path(cfg.home)):
             error = "达到存储预算，保留规则证据"
-        elif len(encoded) > min(48000, cfg.context_length * 2):
-            error = "项目证据超过本轮模型输入预算"
+        elif not request["units"]:
+            error = "没有可供模型解读的完整差异，保留全部原始依据"
         result = {}
         if error is None:
             try:
                 raw = client.generate_json(model=model, system=SYSTEM, user=encoded,
-                                           schema=MODEL_SCHEMA, timeout=180)
-                result = validate_records(project, packet, raw.get("json") or {})
-                result.update(model=model, prompt_version=PROMPT_VERSION)
+                                           schema=inference_schema(request), timeout=180)
+                result = validate_records(project, packet, expand_inference(raw.get("json") or {}, bindings))
+                result.update(model=model, prompt_version=PROMPT_VERSION,
+                              input_units=len(request["units"]),
+                              omitted_input_units=len(packet["units"]) - len(request["units"]))
                 if not result["accepted"]:
                     result["error"] = "输出未通过证据校验"
                 elif result["rejected"] or result["uninterpreted_units"]:
