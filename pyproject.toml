@@ -1,6 +1,6 @@
 [project]
 name = "xiaomao-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "小猫：本机只读工程观察员（采集与推理解耦）"
 readme = "README.md"
 requires-python = ">=3.11"

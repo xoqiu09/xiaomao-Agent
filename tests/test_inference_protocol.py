@@ -85,3 +85,18 @@ class InferenceProtocolTests(unittest.TestCase):
             notes = summarize_projects(cfg, {'scope': [], 'window': {'date': '2026-10-05'},
                                              'projects': [project]}, Client())
             self.assertEqual(notes[project['repo_id']]['accepted'], 1)
+
+    def test_output_contract_separates_explanation_from_source_fields(self):
+        from xiaomao.feature_daily import prepare_inference, inference_schema, expand_inference
+        project = project_with([self.small_file()])
+        packet = packet_for(project)
+        request, bindings = prepare_inference(packet)
+        properties = inference_schema(request)['properties']['records']['items']['properties']
+        self.assertNotIn('after', properties)
+        self.assertIn('after_explanation', properties)
+        self.assertNotIn('fix', properties['change_type']['enum'])
+        reply = chosen_reply(request)
+        for field in ('before', 'after', 'impact'):
+            reply['records'][0][field + '_explanation'] = reply['records'][0].pop(field)
+        result = validate_records(project, packet, expand_inference(reply, bindings))
+        self.assertEqual(result['accepted'], 1)

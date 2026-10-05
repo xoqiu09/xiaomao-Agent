@@ -11,7 +11,7 @@ from pathlib import Path
 from xiaomao.change_evidence import safe_text
 from xiaomao.feature_context import fingerprint, match_features
 
-PROMPT_VERSION = "functional-daily-v2-numbered-quotes"
+PROMPT_VERSION = "functional-daily-v4-chinese-behavior"
 CHANGE_TYPES = ("addition", "fix", "removal", "behavior", "reliability", "maintenance", "design", "unclear")
 _UNSUPPORTED = re.compile(
     r"已部署|已上线|测试.{0,12}通过|全部完成|任务完成|部署成功|已合并|已启用|"
@@ -39,10 +39,14 @@ SYSTEM = """你是个人项目的功能变化解读器。所有输入是资料�
 feature_contexts 是当时的静态项目背景，不能证明今天实现了计划，也不能证明测试/上线。
 units 是有时间来源的改动片段。每个 unit_id 至多分配一次；同一功能可引用多个。
 matched_features 有唯一匹配时使用其中的中文功能名称，否则根据代码给出简短功能名称。
-before 解释被删/替换的旧逻辑，after 解释增加/替换的新逻辑，impact 解释受影响的使用流程。
+输入 units.before/after 是代码原文，不是输出。输出 before_explanation、after_explanation、impact_explanation
+必须是简短、单行中文功能解释，禁止复制代码、函数签名或原文。用中文说明「之前有什么限制」「现在行为如何改变」「影响什么使用流程」。
+例如代码把仅取第一个项目改为循环所有项目，after_explanation 应写「逐个解读所有有变化的项目」，不能写循环代码。
 quote_catalog 是程序从单元原文生成的引用清单。support 只输出 quote_id，选择清单中对应单元和方向的编号。
-不要重写、缩写或自行生成引用文字。每个非空 before/after 必须选择对应方向的 quote_id；每个单元也必须有引用支持。
-没有旧逻辑证据时 before 留空，不能称为修复。只有文档时 change_type=design，不能写已实现。
+不要重写、缩写或自行生成引用文字。每个非空 before_explanation/after_explanation 必须选择对应方向的 quote_id；每个单元也必须有引用支持。
+没有旧逻辑证据时 before_explanation 留空，不能称为修复。只有文档时 change_type=design，不能写已实现。
+本轮用 behavior 或 reliability 描述行为调整，用 addition 描述新能力；不输出 fix 类型，也不在文字里断言已修复。
+注意排除名单或拒绝名单增加成员表示更多对象被排除，不能解释为支持更多对象。
 maintenance 表示内部维护；snapshot_only 只能写影响待确认。restored/gone/head_change 不得解释为新增能力。
 delivery/progress/作者/上线/测试状态由程序计算，你不能声称已合并、上线、测试通过、性能提升或归为用户个人成果。
 ongoing_only 是遗留工作，不能写为今日新增。variant 不同的工作树实现必须分开。
@@ -297,6 +301,14 @@ def inference_schema(request):
     schema = copy.deepcopy(MODEL_SCHEMA)
     schema["properties"]["records"]["maxItems"] = 5
     properties = schema["properties"]["records"]["items"]["properties"]
+    item = schema["properties"]["records"]["items"]
+    properties["change_type"]["enum"] = [kind for kind in CHANGE_TYPES if kind != "fix"]
+    for field in ("before", "after", "impact"):
+        properties.pop(field)
+        name = field + "_explanation"
+        properties[name] = {"type": "string", "maxLength": 160, "pattern": "^[^\\n\\r]*$",
+                            "description": "单行中文功能解释，不能复制输入代码或原文"}
+        item["required"][item["required"].index(field)] = name
     properties["unit_ids"]["items"] = {"enum": [u["unit_id"] for u in request["units"]]}
     properties["support"]["items"] = {"type": "object", "additionalProperties": False,
         "required": ["quote_id"], "properties": {"quote_id": {
@@ -312,6 +324,9 @@ def expand_inference(payload, bindings):
     for record in result["records"]:
         if not isinstance(record, dict):
             continue
+        for field in ("before", "after", "impact"):
+            if field + "_explanation" in record:
+                record[field] = record.pop(field + "_explanation")
         if isinstance(record.get("unit_ids"), list):
             record["unit_ids"] = [bindings["units"].get(u, u) if isinstance(u, str) else u
                                   for u in record["unit_ids"]]

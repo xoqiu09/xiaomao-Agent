@@ -52,11 +52,19 @@ def render_summary(bundle, notes):
     lines.extend(["", "仍在推进的功能", "--------"])
     ongoing = False
     for project, rows in records:
-        for record in rows:
+        unknown = [r for r in rows if r["has_ongoing"] and r["feature_name"] == "相关功能"]
+        if unknown:
+            ongoing = True
+            suffix = "其中有本窗口新观察，具体功能影响待确认。" if any(r["today"] for r in unknown) else "本窗口没有新的推进证据，不计为今日成果。"
+            lines.append(f"- {project['display_name']}：保留未提交工作，功能归属待确认（{len(unknown)} 组依据，详见「查看依据」）。{suffix}")
+        named = [r for r in rows if r["has_ongoing"] and r["feature_name"] != "相关功能"]
+        for record in named[:5]:
             if record["has_ongoing"]:
                 ongoing = True
                 suffix = "本窗口有新的观察。" if record["today"] else "本窗口没有新的推进证据，不计为今日成果。"
                 lines.append(f"- {project['display_name']} · {record['feature_name']}：最后观察时有未提交工作。{suffix}")
+        if len(named) > 5:
+            lines.append(f"- {project['display_name']}：另有 {len(named) - 5} 项未提交功能工作，详见「查看依据」。")
     if not ongoing:
         lines.append("- 已覆盖工作树最后观察时没有未提交修改；未覆盖部分无法判断。")
     lines.extend(["", "待确认与采集缺口", "--------"])
