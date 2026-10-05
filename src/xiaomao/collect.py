@@ -621,6 +621,8 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
             if wt.worktree_id not in registered_ids and wt.scan:
                 extra.append(scan_worktree(conn, cfg, project, wt,
                                            expect_common_dir=getattr(wt, "_expected_common_dir", None)))
+    # Failed discovery is coverage evidence, never proof of disappearance.
+    extra.extend(getattr(project, "_inventory_failures", []))
     if extra:
         insert_event(
             conn,

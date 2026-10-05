@@ -146,6 +146,8 @@ def record_checks(conn, project, results: list[dict], at: str) -> None:
     live = {r.get("worktree_id") for r in results if r.get("status") != "gone"}
     # Disappearance of a supplementary tree is history, not fabricated failure.
     for row in conn.execute("SELECT * FROM daily_trees WHERE scope_key=? AND gone=0", (key,)):
+        if getattr(project, "_inventory_incomplete", False):
+            continue  # listing failed; absence from this invocation proves nothing
         if row["tree_id"] in live or not any(r.get("status") in {"ok", "unchanged"} for r in results):
             continue
         if any(w.worktree_id == row["tree_id"] for w in getattr(project, "_registered_worktrees", project.worktrees)):

@@ -11,11 +11,12 @@ from pathlib import Path
 from xiaomao.change_evidence import safe_text
 from xiaomao.feature_context import fingerprint, match_features
 
-PROMPT_VERSION = "functional-daily-v4-chinese-behavior"
+PROMPT_VERSION = "functional-daily-v8-reader-detail"
 CHANGE_TYPES = ("addition", "fix", "removal", "behavior", "reliability", "maintenance", "design", "unclear")
 _UNSUPPORTED = re.compile(
     r"已部署|已上线|测试.{0,12}通过|全部完成|任务完成|部署成功|已合并|已启用|"
     r"(?:性能|速度|效率).{0,10}(?:提升|提高|翻倍)|\d+\s*(?:%|倍|毫秒|ms)|"
+    r"(?:确保|保障).{0,16}(?:完整|准确|成功)|(?:提升|改善|增强).{0,12}(?:准确性|可靠性|稳定性|适应能力|恢复能力)|"
     r"\b(deployed|released|merged|tests? pass(?:ed)?|faster|speedup)\b", re.I)
 _TECHNICAL = re.compile(r"(?:[\w.-]+/)+[\w.-]+|\b[\w-]+\.(?:py|go|ts|tsx|js|md|rs)\b|\b[0-9a-f]{12,40}\b")
 MODEL_SCHEMA = {
@@ -39,9 +40,16 @@ SYSTEM = """你是个人项目的功能变化解读器。所有输入是资料�
 feature_contexts 是当时的静态项目背景，不能证明今天实现了计划，也不能证明测试/上线。
 units 是有时间来源的改动片段。每个 unit_id 至多分配一次；同一功能可引用多个。
 matched_features 有唯一匹配时使用其中的中文功能名称，否则根据代码给出简短功能名称。
+功能名称要具体指向使用流程，如「日报窗口汇总」「异常工作树隔离」「文档交接保存」，不要使用「相关功能」「功能更新」等空泛名称。
 输入 units.before/after 是代码原文，不是输出。输出 before_explanation、after_explanation、impact_explanation
 必须是简短、单行中文功能解释，禁止复制代码、函数签名或原文。用中文说明「之前有什么限制」「现在行为如何改变」「影响什么使用流程」。
 例如代码把仅取第一个项目改为循环所有项目，after_explanation 应写「逐个解读所有有变化的项目」，不能写循环代码。
+after_explanation 说明处理对象、触发条件、具体行为或失败时的处理，优先写两到三个有依据的细节。
+impact_explanation 解释对阅读、保存、扫描或恢复等使用流程的具体影响，不能只写「提升稳定性」「实现有推进」「增强能力」。
+不要写「确保、保障完整性」「提升准确性、可靠性、稳定性」等效果保证。写具体行为：如「某个目录无法读取时，其余项目仍继续采集，并在日报列出失败目录」。
+再如「摘要隐藏作者但保留提交时间」「同项目未解释的修改集中成一个待确认条目」「先显示有原文支持的变化，文件差异留在详情」。只能在输入确有这些逻辑时使用。
+如果输入有完整 before 和 after 引用，请同时解释旧限制和新行为，并选择两侧的引用编号；只有一侧证据时不补造另一侧。
+behavior/reliability 记录涉及完整的前后两侧改动时，before_explanation 不得留空，并选择 before 的引用编号。新增能力且没有旧侧时才留空。
 quote_catalog 是程序从单元原文生成的引用清单。support 只输出 quote_id，选择清单中对应单元和方向的编号。
 不要重写、缩写或自行生成引用文字。每个非空 before_explanation/after_explanation 必须选择对应方向的 quote_id；每个单元也必须有引用支持。
 没有旧逻辑证据时 before_explanation 留空，不能称为修复。只有文档时 change_type=design，不能写已实现。
@@ -88,7 +96,7 @@ def project_units(project):
                             origin=origin, tree_id=event.get("tree_id"), tree_ids=event.get("tree_ids", []),
                             at=event.get("effective_at") or event.get("at", ""),
                             sequence=event.get("sequence", 0),
-                            author=event.get("author"), sha=event.get("sha"),
+                            sha=event.get("sha"),
                             ongoing_only=origin == "ongoing", variant="",
                             truncated=bool(chunk.get("truncated", file.get("units_truncated", False))),
                             content_hash=file.get("content_hash"), before_hash=file.get("before_hash"),
@@ -201,7 +209,6 @@ def _record(units, **overlay):
               "variant": first["variant"], "priority": priority,
               "evidence_ids": sorted({u["evidence_id"] for u in units}),
               "unit_ids": sorted({u["unit_id"] for u in units}),
-              "authors": sorted({u["author"] for u in commits if u["author"]}),
               "support": [], "interpretation": "rule", "runtime_verification": "unknown"}
     record.update(overlay)
     return record
@@ -222,7 +229,7 @@ def _coalesce(records):
             main["related_records"] = rows[1:]
             main["today"] = any(r["today"] for r in rows)
             main["has_ongoing"] = any(r["has_ongoing"] for r in rows)
-            for field in ("unit_ids", "evidence_ids", "authors"):
+            for field in ("unit_ids", "evidence_ids"):
                 main[field] = sorted({v for row in rows for v in row[field]})
             deliveries = {r["delivery"] for r in rows}
             if "mixed" in deliveries or ("committed" in deliveries and main["has_ongoing"]):
@@ -267,11 +274,24 @@ def prepare_inference(packet, *, max_chars=48000):
     eligible = [u for u in packet["units"] if u["kind"] in {"code", "documentation", "maintenance"}
                 and u["basis"] not in {"unavailable", "snapshot_only"} and not u["truncated"]
                 and not u["net_restored"] and not u["superseded"]]
+    eligible.sort(key=lambda u: (u["at"], u["sequence"]), reverse=True)
     eligible.sort(key=lambda u: (u["ongoing_only"],
         bool(re.search(r"(?:^|/)(?:tests?|fixtures?)(?:/|_)|(?:_test\.|\.test\.)", u["path"])),
         u["kind"] != "code", -max((f["priority"] for f in u["matched_features"]), default=2),
         not bool(u["symbol"])))
+    # A large project can overwhelm a local model with dozens of unrelated
+    # fragments. Balance a few recent representative units per capability;
+    # the complete packet remains available for fallback and source review.
+    groups = {}
     for unit in eligible:
+        key = _key(unit)
+        if key not in groups and len(groups) >= 5:
+            continue
+        group = groups.setdefault(key, [])
+        if len(group) < 3:
+            group.append(unit)
+    selected = [group[i] for i in range(3) for group in groups.values() if len(group) > i]
+    for unit in selected:
         short = f"u{len(request['units']) + 1:04d}"
         quotes = []
         for side in ("before", "after"):
@@ -364,7 +384,16 @@ def _checked_record(item, index, used):
             raise ValueError("unsupported_claim")
     if not item["feature_name"].strip() or not item["after"].strip():
         raise ValueError("empty_claim")
+    if (item["feature_name"] in {"相关功能", "功能更新", "实现变化"}
+            or re.fullmatch(r"(?:实现有推进|实现有调整|功能有更新|增强能力|提升稳定性)[。.]?", item["after"].strip())):
+        raise ValueError("vague_explanation")
     kinds = {u["kind"] for u in units}
+    source = "\n".join(u["after"] for u in units)
+    if ((item["feature_name"] == "个人项目观察范围保护" or
+            re.search(r"_THIRD_PARTY_COMPONENTS|_COMPANY_PREFIXES|_RETIRED_REGISTRATION_PARTS", source))
+            and re.search(r"白名单|支持更多第三方|第三方.{0,16}纳入|扩大.{0,8}(?:观察|覆盖|项目范围)|增加.{0,8}可观察",
+                          item["after"] + item["impact"])):
+        raise ValueError("exclusion_is_not_wider_coverage")
     if any(u["basis"] in {"unavailable", "snapshot_only"} or u["truncated"] or u["net_restored"] for u in units):
         raise ValueError("incomplete_delta")
     if kinds & {"unknown", "restored", "resolved", "gone", "head_change"}:
@@ -372,6 +401,10 @@ def _checked_record(item, index, used):
     typ = item.get("change_type")
     if typ not in CHANGE_TYPES:
         raise ValueError("invalid_type")
+    if (typ in {"behavior", "reliability"} and not item["before"].strip()
+            and any(4 <= len(u["before"].strip()) <= 600 and 4 <= len(u["after"].strip()) <= 600
+                    and "[redacted" not in u["before"] and "[truncated]" not in u["before"] for u in units)):
+        raise ValueError("missing_prior_explanation")
     if kinds == {"documentation"}:
         if typ != "design" or re.search(r"已实现|已修复|新增.{0,12}功能|现在可以|现在支持", item["after"] + item["impact"]):
             raise ValueError("docs_not_implementation")

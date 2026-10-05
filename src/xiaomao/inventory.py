@@ -135,6 +135,8 @@ def effective_config(cfg):
     all_registered = {str(Path(w.path).resolve()) for p in result.projects for w in p.worktrees}
     for project in result.projects:
         project._registered_worktrees = list(project.worktrees)
+        project._inventory_failures = []
+        project._inventory_incomplete = False
         project._discovery_scope = [cfg.personal_roots, cfg.personal_owners] if cfg.personal_roots else []
         if project_exclusion_reason(project):
             continue
@@ -171,6 +173,8 @@ def effective_config(cfg):
     for project in result.projects:
         if project.worktree_policy != "all" or project_exclusion_reason(project):
             continue
+        project._inventory_failures = getattr(project, "_inventory_failures", [])
+        project._inventory_incomplete = getattr(project, "_inventory_incomplete", False)
         known = {str(Path(w.path).resolve()) for w in project.worktrees}
         for source in list(project.worktrees):
             if not source.scan or excluded(source.path):
@@ -180,13 +184,24 @@ def effective_config(cfg):
                 listing = run_git(Path(source.path), "worktree", "list", "--porcelain").stdout
                 for found in parse_worktree_porcelain(listing):
                     resolved = str(Path(found.path).resolve())
-                    if found.bare or resolved in known or excluded(resolved) or not Path(resolved).is_dir():
+                    if found.bare or resolved in known or not Path(resolved).is_dir():
+                        continue
+                    reason = excluded(resolved)
+                    if reason:
+                        if reason.startswith(("git_metadata_timeout", "invalid_git_metadata", "invalid_project_path")):
+                            result._inventory_errors.append(f"{project.project_id}: {resolved}: {reason}")
+                            project._inventory_failures.append({"worktree_id": tree_id(project.project_id, resolved),
+                                "status": "error", "inserted": False, "error": reason})
+                            known.add(resolved)  # one failure per tree, even through multiple copies
                         continue
                     try:
                         target = metadata(resolved)
                     except Exception:
                         result._inventory_errors.append(
                             f"{project.project_id}: {resolved}: worktree_metadata_unavailable")
+                        project._inventory_failures.append({"worktree_id": tree_id(project.project_id, resolved),
+                            "status": "error", "inserted": False, "error": "worktree_metadata_unavailable"})
+                        known.add(resolved)
                         continue
                     if target["common_dir"] != source_meta["common_dir"]:
                         continue
@@ -196,6 +211,7 @@ def effective_config(cfg):
                     tree._expected_repo_id = target["repo_id"]
                     project.worktrees.append(tree)
             except Exception:
+                project._inventory_incomplete = True
                 result._inventory_errors.append(f"{project.project_id}: worktree_inventory_unavailable")
     verified = {str(Path(w.path).resolve()) for p in result.projects
                 if not project_exclusion_reason(p) for w in p.worktrees}
