@@ -85,6 +85,20 @@ class FeatureDailyTests(unittest.TestCase):
         self.assertNotIn("recover.py", body)
         self.assertIn("功能影响待确认", body)
 
+    def test_many_unassigned_ongoing_units_have_one_project_summary(self):
+        for i in range(20):
+            (self.repo / f"pending{i}.py").write_text(f"def pending{i}():\n    return True\n")
+        self.scan("2026-10-01T13:00:00+00:00")
+        self.scan("2026-10-02T03:00:00+00:00")
+        bundle = self.bundle()
+        body = render_bundle(bundle)
+        ongoing = body.split("仍在推进的功能\n--------", 1)[1].split("待确认与采集缺口", 1)[0]
+        self.assertEqual(sum(line.startswith("- ") for line in ongoing.splitlines()), 1)
+        self.assertIn("功能归属待确认", ongoing)
+        self.assertIn("不计为今日成果", ongoing)
+        from xiaomao.feature_daily import project_units
+        self.assertGreaterEqual(len(project_units(bundle["projects"][0])), 20)
+
     def test_two_functions_in_one_new_file_split_by_catalog_symbols(self):
         self.catalog()
         self.scan("2026-10-01T13:00:00+00:00")

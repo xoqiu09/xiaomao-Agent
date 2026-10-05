@@ -276,7 +276,7 @@ def project_lines(project) -> list[str]:
     lines = []
     for item in project["commits"]:
         kind = "合并提交" if item["kind"] == "merge" else "提交"
-        lines.append(f"{kind}：{item['subject']}（作者 {item['author']}，{item['sha'][:12]}）")
+        lines.append(f"{kind}：{item['subject']}（{item['sha'][:12]}）")
     uncovered = [a for a in project["activity"] if not a["covered_by_commits"] and not a.get("followed_by_restore")]
     kinds = {"workspace": "工作区修改", "restored": "观察到修改后恢复至原提交",
              "resolved": "工作区差异消失，HEAD 已变化", "gone": "工作树已消失",
@@ -305,7 +305,7 @@ def render_evidence(bundle: dict, notes: dict | None = None) -> str:
              f"覆盖：{bundle['coverage']}" + (" · 截止时间前预览" if bundle["preview"] else ""),
              "", "今日总览", "--------",
              f"{len(bundle['projects'])} 个项目，{changed} 个项目有新增观察。",
-             "只报告有证据的项目变化；提交作者不等于本机操作者。"]
+             "只报告有证据的个人项目变化。"]
     if not changed:
         lines.append("已覆盖部分未记录到新变化；遗留修改见下方，不据此推断没有工作。")
     lines.extend(["", "各项目变化", "--------"])
@@ -333,7 +333,7 @@ def render_evidence(bundle: dict, notes: dict | None = None) -> str:
             lines.append(f"    目录：{tree['path']} · 最后核对：{tree['last_seen']}")
         for commit in project["commits"]:
             lines.append(f"  [{commit['evidence_id']}] {commit['sha']} · {commit['subject']} · "
-                         f"作者 {commit['author']} · 提交时间 {commit['committed_at']} · 首次观察 {commit['first_seen']}")
+                         f"提交时间 {commit['committed_at']} · 首次观察 {commit['first_seen']}")
             lines.append("    路径：" + "、".join(f["path"] for f in commit["files"]))
             lines.append("    来源工作树：" + "、".join(commit["tree_ids"]))
             if commit["kind"] == "merge":

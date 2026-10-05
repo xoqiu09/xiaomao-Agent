@@ -387,12 +387,12 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def write_daily_briefing(cfg, bundle, notes) -> Path:
     """Use the exact daily packet and validated notes; do not rescan or infer."""
-    from xiaomao.feature_daily import feature_records, record_sentence
+    from xiaomao.feature_render import today_sentences
     from xiaomao.report_access import bind_report
     today = []
     for project in bundle["projects"]:
         note = notes.get(project["repo_id"], {})
-        bullets = [record_sentence(r) for r in feature_records(project, note) if r["today"]]
+        bullets = today_sentences(project, note, limit=3)
         if not project["changed"]:
             if project["ongoing"]:
                 today.append(f"{project['display_name']}：有遗留未提交工作，未观察到新增变化。")

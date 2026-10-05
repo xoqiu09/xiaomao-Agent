@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,8 +14,8 @@ from xiaomao.paths import ensure_layout, layout
 from xiaomao.report_access import bind_report, scope_set
 from xiaomao.store import open_db, utc_now
 
-from xiaomao.feature_daily import (PROMPT_VERSION, MODEL_SCHEMA, SYSTEM, model_packet,
-                                   validate_records)
+from xiaomao.feature_daily import (PROMPT_VERSION, SYSTEM, model_packet, prepare_inference,
+                                   inference_schema, expand_inference, validate_records)
 MAX_CATCHUP = 7
 
 
@@ -42,8 +43,9 @@ def summarize_projects(cfg, bundle, client) -> dict:
         if not project["changed"]:
             continue
         packet = _model_packet(bundle, project)
-        encoded = json.dumps(packet, ensure_ascii=False, sort_keys=True)
-        cache_key = _hash([PROMPT_VERSION, model, bundle["scope"], packet])
+        request, bindings = prepare_inference(packet, max_chars=min(48000, cfg.context_length * 2))
+        encoded = json.dumps(request, ensure_ascii=False, sort_keys=True)
+        cache_key = _hash([PROMPT_VERSION, model, cfg.depth_candidates, bundle["scope"], packet])
         with open_db(layout(Path(cfg.home))["db"]) as conn:
             cached = conn.execute("SELECT note_json FROM daily_model_cache WHERE cache_key=?",
                                   (cache_key,)).fetchone()
@@ -55,15 +57,55 @@ def summarize_projects(cfg, bundle, client) -> dict:
             error = "本地模型不可用或未启用"
         elif storage_over_budget(Path(cfg.home)):
             error = "达到存储预算，保留规则证据"
-        elif len(encoded) > min(48000, cfg.context_length * 2):
-            error = "项目证据超过本轮模型输入预算"
+        elif not request["units"]:
+            error = "没有可供模型解读的完整差异，保留全部原始依据"
         result = {}
         if error is None:
             try:
+                started = time.monotonic()
                 raw = client.generate_json(model=model, system=SYSTEM, user=encoded,
-                                           schema=MODEL_SCHEMA, timeout=180)
-                result = validate_records(project, packet, raw.get("json") or {})
-                result.update(model=model, prompt_version=PROMPT_VERSION)
+                                           schema=inference_schema(request), timeout=180)
+                expanded = expand_inference(raw.get("json") or {}, bindings)
+                result = validate_records(project, packet, expanded)
+                initial_rejected = result["rejected"]
+                if initial_rejected and result["accepted"] < 5:
+                    from xiaomao.feature_daily import _checked_record
+                    index = {u["unit_id"]: u for u in packet["units"]}
+                    used, accepted_items = set(), []
+                    for item in expanded["records"]:
+                        try:
+                            checked = _checked_record(item, index, used)
+                        except (ValueError, TypeError, KeyError):
+                            continue
+                        accepted_items.append(item)
+                        used.update(checked["unit_ids"])
+                    repair = dict(request, units=[u for u in request["units"]
+                        if bindings["units"][u["unit_id"]] not in used])
+                    aliases = {u["unit_id"] for u in repair["units"]}
+                    repair["quote_catalog"] = [q for q in request["quote_catalog"] if q["unit_id"] in aliases]
+                    remaining_s = int(180 - (time.monotonic() - started))
+                    if repair["units"] and remaining_s >= 15:
+                        result["repair_attempted"] = True
+                        repair_model = next((m for m in cfg.depth_candidates if m != model), model)
+                        schema = inference_schema(repair)
+                        schema["properties"]["records"]["maxItems"] = 5 - len(accepted_items)
+                        try:
+                            corrected = client.generate_json(model=repair_model,
+                                system=SYSTEM + "\n这是唯一一次重写。先前有解释未通过校验。只解释剩余单元，写具体行为，避免泛化效果保证、排除方向颠倒、混合不同功能或编造引用。",
+                                user=json.dumps(repair, ensure_ascii=False, sort_keys=True),
+                                schema=schema, timeout=remaining_s)
+                            more = expand_inference(corrected.get("json") or {}, bindings)
+                            revised = validate_records(project, packet,
+                                {"records": accepted_items + more["records"][:5 - len(accepted_items)]})
+                            revised["repair_attempted"] = True
+                            revised["repair_model"] = repair_model
+                            result = revised
+                        except Exception:
+                            pass  # retain the first validated explanations and rule evidence
+                result["initial_rejected"] = initial_rejected
+                result.update(model=model, prompt_version=PROMPT_VERSION,
+                              input_units=len(request["units"]),
+                              omitted_input_units=len(packet["units"]) - len(request["units"]))
                 if not result["accepted"]:
                     result["error"] = "输出未通过证据校验"
                 elif result["rejected"] or result["uninterpreted_units"]:

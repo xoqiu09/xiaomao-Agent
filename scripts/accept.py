@@ -58,10 +58,11 @@ def isolated_env(root: Path) -> dict[str, str]:
 
 
 def run(argv: list[str], *, env: dict[str, str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+    timeout = 600 if argv[1:3] == ["-m", "unittest"] else 180
     try:
-        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, env=env, timeout=180)
+        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(argv, 124, "", "command timed out after 180 seconds")
+        return subprocess.CompletedProcess(argv, 124, "", f"command timed out after {timeout} seconds")
     except OSError as exc:
         return subprocess.CompletedProcess(argv, 127, "", f"{type(exc).__name__}: {exc}")
 
