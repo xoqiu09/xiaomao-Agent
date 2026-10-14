@@ -1,6 +1,15 @@
 # 小猫 Agent 优化项目
 
-本目录专用于小猫 Agent 的持续优化。用户选择的第一阶段是整体体检，按实际问题排优先级；后续以用户指定的问题和体检结论逐项推进。
+本目录专用于小猫 Agent 的持续优化。主线见 [docs/coordination/xiaomao-core-plan.md](docs/coordination/xiaomao-core-plan.md)，当前任务见 [docs/coordination/claude-code-start-here.md](docs/coordination/claude-code-start-here.md)。
+
+## 产品方向（2026-10-14 用户确认）
+
+- **定位**：小猫是用户的个人项目进度秘书。它主动告诉用户做了什么、多了哪些核心功能、做到哪、代码在哪；开工时告诉用户从哪继续。它不替用户写代码，也不派活。
+- **四档状态**：给用户看的每条变化都要标出「未提交 / 仅本机 / 已推送 / 已合并」之一。用户在 Mac Studio（小猫运行机）和 MacBook Pro 两台机器上开发，通过 GitHub 同步。
+- **主动汇报**：晚报（21:45 前送达，规则版先发）、早上开工提醒、未推送提醒、每周进度。
+- **面向用户的文字**：白话，最多 3 个项目、每个最多 3 条，不出现「未核实 / 范围哈希 / 观察 ID / 覆盖 partial / 待确认」这类术语。严谨的证据放在依据文件里，不放进正文。
+- **暂不做**：自动派发 Claude Code / Codex、任务系统（coordination.sqlite / TaskSpec）、常驻协调进程、TASK/HANDOFF/STATE 导出包。如确有需要，先在核心方案中写明理由并经用户确认。
+- **和用户沟通**：用白话说明「做了什么、用户会看到什么变化」，不要用内部术语汇报。方案出现分歧时，先问用户想要什么，不要自行扩大范围。
 
 ## 源码与运行身份
 
@@ -30,7 +39,14 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/xiuqiu/.local/bin/python3.11 scr
 
 本轮报告和证据保存在 `/Users/xiuqiu/Documents/Codex/2026-10-13/bang/outputs/`：`xiaomao-agent-health-report.md`、`xiaomao-health-evidence.json`、`xiaomao-isolated-acceptance.json`。
 
-优先排查工作树读取超时和日报覆盖缺口，再改进覆盖状态解释、生成延迟、源码运行说明与文档交接分支的整合。
+2026-10-14 起，优先级以核心方案的阶段 1 为准：
+1. 复现并修复 `database is locked`
+2. 四档状态
+3. 白话晚报
+4. 规则版先发、模型后补
+5. 通知带内容
+
+工作树读取超时和覆盖缺口继续记录在依据文件里，不再向用户正文展示这些解释。
 
 ## GitHub account and write checks (2026-10-02)
 
