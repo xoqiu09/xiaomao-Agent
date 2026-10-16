@@ -185,7 +185,7 @@ class DailyJobTests(unittest.TestCase):
             count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
             conn.execute("UPDATE meta SET value='2' WHERE key='schema'")
         with open_db(self.db) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "4")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "5")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0], count)
 
     def test_regenerating_preserves_old_report_and_metadata(self):

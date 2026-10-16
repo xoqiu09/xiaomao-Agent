@@ -20,7 +20,7 @@ class InventoryTests(unittest.TestCase):
             self.assertIsNone(conn.execute(
                 "SELECT name FROM sqlite_master WHERE name='daily_samples'").fetchone())
         with open_db(db) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "4")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "5")
             self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='legacy_marker'").fetchone()[0],
                              "preserve")
             self.assertIsNotNone(conn.execute(
