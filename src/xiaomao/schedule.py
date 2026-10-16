@@ -100,14 +100,16 @@ def bootstrap(path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def daily_plist_payload(*, home: Path, log_dir: Path, project: str = "website") -> dict[str, Any]:
+def daily_plist_payload(*, home: Path, log_dir: Path, project: str = "website",
+                        daily_time: str = "21:30") -> dict[str, Any]:
     stdout = str(log_dir / "daily.out.log")
     stderr = str(log_dir / "daily.err.log")
     return {
         "Label": DAILY_LABEL,
         "ProgramArguments": daily_program_argv(home=home, project=project),
-        "StartCalendarInterval": {"Hour": DAILY_HOUR, "Minute": DAILY_MINUTE},
-        "RunAtLoad": False,
+        "StartCalendarInterval": {"Hour": int(daily_time[:2]), "Minute": int(daily_time[3:])},
+        "StartInterval": START_INTERVAL_SECONDS,
+        "RunAtLoad": True,
         "WorkingDirectory": str(repo_root()),
         "StandardOutPath": stdout,
         "StandardErrorPath": stderr,
@@ -175,15 +177,17 @@ def uninstall(path: Path | None = None) -> dict[str, Any]:
 
 
 def install_daily(*, home: Path, log_dir: Path, project: str = "website", path: Path | None = None) -> dict[str, Any]:
+    from xiaomao.config import load_config
     path = path or default_daily_plist_path()
-    payload = daily_plist_payload(home=home, log_dir=log_dir, project=project)
+    payload = daily_plist_payload(home=home, log_dir=log_dir, project=project,
+                                  daily_time=load_config(home).daily_time)
     write_plist(path, payload)
     bootout(path)
     loaded = bootstrap(path)
     return {
         "path": str(path),
         "label": DAILY_LABEL,
-        "calendar": {"Hour": DAILY_HOUR, "Minute": DAILY_MINUTE},
+        "calendar": payload["StartCalendarInterval"],
         "bootstrap_returncode": loaded.returncode,
         "bootstrap_stderr": loaded.stderr.strip()[:400],
         "bootstrap_stdout": loaded.stdout.strip()[:400],

@@ -44,155 +44,40 @@ def _facts_changed(row) -> bool:
     ) > 0
 
 
+def prefix_tree_rows(conn, project) -> list:
+    """Latest observation of each live branch-prefix tree. Supplementary only:
+    these trees are not part of the registered scope or handoff coverage."""
+    from xiaomao.collect import PREFIX_WORKTREE_NOTE
+
+    if not project.branch_prefixes:
+        return []
+    return list(
+        conn.execute(
+            """
+            SELECT w.worktree_id, w.canonical_path, o.observation_id, o.observed_at_utc,
+                   o.head_oid, o.branch_ref, o.collection_status,
+                   o.staged_count, o.unstaged_count, o.untracked_count,
+                   json_extract(o.facts_json, '$.last_commit_at') AS last_commit_at
+            FROM worktrees w
+            LEFT JOIN observations o ON o.observation_id = (
+              SELECT observation_id FROM observations
+              WHERE worktree_id = w.worktree_id AND project_id = w.project_id
+              ORDER BY observed_at_utc DESC, rowid DESC LIMIT 1
+            )
+            WHERE w.project_id = ? AND w.notes = ? AND w.scan_enabled = 1
+            ORDER BY o.branch_ref
+            """,
+            (project.project_id, PREFIX_WORKTREE_NOTE),
+        )
+    )
+
+
 def render_daily(cfg: AppConfig, conn, *, date: str, model_note: str | None = None) -> str:
-    lines: list[str] = []
-    lines.append(f"小猫日报 {date}")
-    lines.append("=" * (6 + len(date)))
-    lines.append(f"时区：{cfg.timezone}")
-    lines.append(f"生成时间（UTC）：{utc_now()}")
-    lines.append("证据栏由程序从 SQLite 渲染，不经模型改写。")
-    lines.append("只报告授权观察范围内磁盘可见状态；无变化不等于没有工作。")
-    lines.append("")
-
-    any_change = False
-    review_candidate: str | None = None
-    next_step: str | None = None
-    verified: list[str] = []
-    unverified = [
-        "测试：unknown（本版本不执行业务仓测试，也未接入授权报告）",
-        "部署：unknown（本版本无远程连接器）",
-    ]
-    unknown = [
-        "当前版本测试是否通过：unknown",
-        "是否已部署 / 已验收：unknown",
-        "两次采集之间改了又撤销、或未保存到磁盘的编辑：不可见",
-    ]
-
-    for project in cfg.projects:
-        if project_exclusion_reason(project):
-            continue
-        rows = authorized_rows(conn, project)
-        last_run = last_scan_success(conn, project.project_id)
-        lines.append(f"项目：{project.display_name}（{project.project_id}）")
-        lines.append("-" * 24)
-        if last_run and last_run["finished_at"]:
-            lines.append(f"最近一次扫描成功：{last_run['finished_at']}")
-            verified.append(
-                f"{project.project_id} 最近一次扫描成功 {last_run['finished_at']} "
-                f"（inserted={last_run['inserted']} unchanged={last_run['unchanged']}）"
-            )
-            gap = gap_seconds_since(last_run["finished_at"])
-            if gap is not None and gap > GAP_WARN_AFTER_S:
-                lines.append(
-                    f"采集缺口约 {gap} 秒：可能含睡眠/关机/登出或其他未采集窗口。"
-                    "缺口内未保存到磁盘的编辑不可见，不编造。"
-                )
-                unknown.append(f"{project.project_id} 采集缺口约 {gap} 秒内的磁盘外编辑")
-        else:
-            lines.append("最近一次扫描成功：尚无 scan_runs 记录")
-        scanned = [r for r in rows if r["scan_enabled"]]
-        if not scanned:
-            lines.append("本阶段没有启用扫描的工作树。")
-            lines.append("")
-            continue
-        for row in scanned:
-            lines.append(f"工作树：{row['worktree_id']}")
-            if row["observation_id"] is None:
-                lines.append("  事实：尚未采集")
-                lines.append("  未知：当前 HEAD / 工作区")
-                unknown.append(f"{row['worktree_id']} 尚未采集")
-                continue
-            lines.append(f"  指纹首次采集时间：{row['observed_at_utc']}")
-            lines.append(f"  分支 / HEAD：{_branch_label(row)} / {_short(row['head_oid'])}")
-            lines.append(f"  采集状态：{row['collection_status']}")
-            verified.append(
-                f"{row['worktree_id']} HEAD {_short(row['head_oid'])} / {_branch_label(row)} / {row['collection_status']}"
-            )
-            if _facts_changed(row):
-                any_change = True
-                change = (
-                    f"staged {row['staged_count']} / unstaged {row['unstaged_count']} / untracked {row['untracked_count']}"
-                )
-                lines.append(f"  变化：{change}")
-                if review_candidate is None:
-                    facts = json.loads(row["facts_json"] or "{}")
-                    sample = None
-                    for key in ("unstaged", "staged", "untracked"):
-                        items = facts.get(key) or []
-                        if items:
-                            sample = f"{key}:{items[0]}"
-                            break
-                    review_candidate = (
-                        f"{row['worktree_id']} 有未提交磁盘变化（{change}"
-                        + (f"，例如 {sample}" if sample else "")
-                        + "）。不要把 dirty 解释成已部署。"
-                    )
-                    next_step = (
-                        f"复核 {row['worktree_id']} 的未提交路径（{change}）。"
-                        "测试与部署仍 unknown，没有下一步上线依据。"
-                    )
-            else:
-                lines.append("  变化：相对上次指纹，工作区 clean（仅磁盘可见状态）")
-            lines.append("  测试：unknown（本版本不执行业务仓测试，也未接入授权报告）")
-            lines.append("  部署：unknown（本版本无远程连接器）")
-        idle = [r for r in rows if not r["scan_enabled"]]
-        if idle:
-            names = ", ".join(r["worktree_id"] for r in idle)
-            lines.append("已登记未扫描：" + names)
-            unverified.append(f"未扫描工作树（仅登记）：{names}")
-        lines.append("")
-
-    lines.append("今日观察")
-    lines.append("--------")
-    if any_change:
-        lines.append("授权观察范围内有磁盘可见变化（见上方工作树变化栏）。")
-    else:
-        lines.append("授权观察范围内无新变化")
-    lines.append("")
-    lines.append("已核实")
-    lines.append("------")
-    if verified:
-        for item in verified:
-            lines.append(f"- {item}")
-    else:
-        lines.append("- 尚无已核实的采集事实")
-    lines.append("")
-    lines.append("未核实")
-    lines.append("------")
-    for item in unverified:
-        lines.append(f"- {item}")
-    lines.append("")
-    lines.append("未知")
-    lines.append("----")
-    for item in unknown:
-        lines.append(f"- {item}")
-    lines.append("")
-    if review_candidate:
-        lines.append("复核候选")
-        lines.append("--------")
-        lines.append(f"- {review_candidate}")
-        lines.append("")
-    if next_step:
-        lines.append("下一步（有证据）")
-        lines.append("--------------")
-        lines.append(f"- {next_step}")
-        lines.append("")
-
-    lines.append("模型解读")
-    lines.append("--------")
+    from xiaomao.daily import build_bundle, render_bundle
+    body = render_bundle(build_bundle(cfg, conn, date=date))
     if model_note:
-        lines.append(model_note)
-    else:
-        lines.append("本报告由规则程序生成，没有调用本地模型。")
-    lines.append("")
-    lines.append("建议")
-    lines.append("----")
-    if any_change:
-        lines.append("- 有未提交变化。不要把工作区 dirty 或 clean 解释成已部署。")
-    else:
-        lines.append("- 授权观察范围内无新变化。不要编造今日成果，也不要把无变化写成没有工作。")
-    lines.append("- 没有测试/部署证据时，状态保持 unknown。")
-    return "\n".join(lines) + "\n"
+        body += "\n附加解读未绑定本窗口证据，未纳入正文。\n"
+    return body
 
 
 def daily_path(cfg: AppConfig, date: str) -> Path:
@@ -212,16 +97,24 @@ def write_daily(
     model_ok: bool = False,
 ) -> Path:
     date = date or local_today(cfg)
+    from xiaomao.daily import build_bundle, render_bundle
+    from xiaomao.daily_jobs import preserve_report
+    from xiaomao.menu_briefing import _atomic_write
+    bundle = build_bundle(cfg, conn, date=date)
     dest = daily_path(cfg, date)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    text = render_daily(cfg, conn, date=date, model_note=model_note)
-    dest.write_text(text, encoding="utf-8")
+    text = render_bundle(bundle)
+    from xiaomao.feature_render import write_details
+    write_details(cfg, bundle, {})
+    if model_note:
+        text += "\n附加解读未绑定本窗口证据，未纳入正文。\n"
+    preserve_report(dest, text)
+    _atomic_write(dest, text)
     from xiaomao.report_access import bind_report
 
-    bind_report(dest, text, cfg, "daily")
-    if model_ok and model_note:
-        daily_model_path(cfg, date).write_text(text, encoding="utf-8")
-        bind_report(daily_model_path(cfg, date), text, cfg, "daily")
+    bind_report(dest, text, cfg, "daily", daily_bundle=bundle)
+    # The legacy model_ok flag does not authorize unstructured model prose.
+    # Structured daily interpretation is published only by daily_jobs.run_daily.
     return dest
 
 

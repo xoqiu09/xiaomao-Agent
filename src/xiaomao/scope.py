@@ -8,7 +8,8 @@ including disabled trees.
 
 from __future__ import annotations
 
-import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,8 @@ _COMPANY_PREFIXES = ("theaiapp-service", "event-services-chooseme-event")
 _ARCHIVE_COMPONENT = "_待删除旧项目_2026-09-22"
 _MAX_GIT_POINTER_BYTES = 4096
 _THIRD_PARTY_COMPONENTS = frozenset(
-    ("stats", "stats.app", "agentnotch", "agentnotch.app", "tokenmonitor", "tokenmonitor.app")
+    ("stats", "stats.app", "agentnotch", "agentnotch.app", "tokenmonitor", "tokenmonitor.app",
+     "token-monitor", "token monitor.app")
 )
 # These original registrations were confirmed retired. Their compatibility
 # links no longer exist, so filesystem resolution alone cannot identify them.
@@ -88,10 +90,21 @@ def path_exclusion_reason(value: str) -> str | None:
 
 
 def _read_git_pointer(path: Path) -> str:
-    if not stat.S_ISREG(path.stat().st_mode):
-        raise ValueError("Git 指针必须是普通文件")
-    with path.open("rb") as handle:
-        raw = handle.read(_MAX_GIT_POINTER_BYTES + 1)
+    # macOS may wait indefinitely for a Documents permission callback in open().
+    # Isolate only this bounded metadata read, never repository code, so a
+    # timeout can end our own child without stopping a model or another job.
+    script = ("import pathlib,stat,sys; p=pathlib.Path(sys.argv[1]); "
+              "assert stat.S_ISREG(p.stat().st_mode); "
+              "f=p.open('rb'); assert stat.S_ISREG(__import__('os').fstat(f.fileno()).st_mode); "
+              "sys.stdout.buffer.write(f.read(4097)); f.close()")
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-c", script, str(path)],
+                              capture_output=True, timeout=2, shell=False, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("读取 Git 指针超时") from exc
+    if proc.returncode:
+        raise ValueError("Git 指针无法读取或不是普通文件")
+    raw = proc.stdout
     if len(raw) > _MAX_GIT_POINTER_BYTES:
         raise ValueError("Git 指针超过读取上限")
     value = raw.decode("utf-8").strip()
@@ -137,6 +150,8 @@ def _git_pointer_exclusion_reason(root: Path) -> str | None:
         reason = path_exclusion_reason(str(common_dir))
         if reason:
             return f"{reason}（commondir 目标）"
+    except TimeoutError:
+        return f"git_metadata_timeout: 读取 Git 指针超时，未采集该工作树（{git_entry}）"
     except (OSError, RuntimeError, ValueError):
         return f"invalid_git_metadata: 无法确认 Git 指针（{git_entry}）"
     return None
