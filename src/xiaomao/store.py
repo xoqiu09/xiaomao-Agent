@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "5"
 
 
 def utc_now() -> str:
@@ -176,6 +176,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    from xiaomao.activity import SCHEMA as DAILY_SCHEMA
+    conn.executescript(DAILY_SCHEMA)
+    from xiaomao.feature_context import SCHEMA as FEATURE_SCHEMA
+    conn.executescript(FEATURE_SCHEMA)
+    from xiaomao.documents import SCHEMA as DOCUMENT_SCHEMA
+    conn.executescript(DOCUMENT_SCHEMA)
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
         ("schema", SCHEMA_VERSION),

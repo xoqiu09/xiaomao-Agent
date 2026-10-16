@@ -273,34 +273,16 @@ def _maybe_model_note(
 
 
 def cmd_daily(ns: argparse.Namespace) -> int:
-    from xiaomao.reports import local_today, write_daily
-
+    from xiaomao.daily_jobs import run_daily
     home = _home_from_args(ns)
-    ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
-    cfg.projects = [p for p in cfg.projects if not project_exclusion_reason(p)]
-    if not cfg.projects:
+    if not any(not project_exclusion_reason(p) for p in cfg.projects) and not cfg.personal_roots:
         sys.stderr.write("尚无可读取的个人项目；未生成日报、未加载模型。\n")
         return 3
-    date = ns.date or local_today(cfg)
-    scheduled = bool(getattr(ns, "scheduled", False))
-    with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
-        note, model_ok = _maybe_model_note(ns, cfg, conn, None, scheduled=scheduled)
-        dest = write_daily(cfg, conn, date=date, model_note=note, model_ok=model_ok)
-        from xiaomao.menu_briefing import write_menu_briefing
-
-        briefing_client = None
-        if model_ok or bool(getattr(ns, "with_model", False)):
-            briefing_client = _briefing_client(cfg)
-        write_menu_briefing(
-            cfg,
-            conn,
-            date=date,
-            client=briefing_client,
-            with_model=bool(briefing_client is not None),
-        )
-    sys.stdout.write(f"{dest}\n")
+    paths = run_daily(cfg, date=ns.date, scheduled=ns.scheduled, with_model=ns.with_model)
+    for path in paths:
+        sys.stdout.write(f"{path}\n")
     return 0
 
 
@@ -315,6 +297,16 @@ def _briefing_client(cfg):
     except Exception:
         return None
     return None
+
+
+def cmd_projects(ns: argparse.Namespace) -> int:
+    from xiaomao.project_commands import projects_command
+    return projects_command(ns, _home_from_args(ns))
+
+
+def cmd_features(ns: argparse.Namespace) -> int:
+    from xiaomao.feature_commands import features_command
+    return features_command(ns, _home_from_args(ns))
 
 
 def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
@@ -518,6 +510,9 @@ def cmd_latest(ns: argparse.Namespace) -> int:
 
     try:
         body = read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+        if ns.kind == "daily" and getattr(ns, "details", False):
+            from xiaomao.report_access import read_daily_details
+            path, body = read_daily_details(path, home, load_config(home))
     except (OSError, ValueError):
         sys.stderr.write("旧报告范围或来源未核实；请重新生成当前授权项目的报告。\n")
         return 3
@@ -546,6 +541,9 @@ def cmd_open(ns: argparse.Namespace) -> int:
 
             try:
                 read_bound_report(path, home, load_config(home), ns.kind, ns.project if ns.kind == "status" else None)
+                if ns.kind == "daily" and getattr(ns, "details", False):
+                    from xiaomao.report_access import read_daily_details
+                    path, _ = read_daily_details(path, home, load_config(home))
             except (OSError, ValueError):
                 sys.stderr.write("旧报告范围或来源未核实；未打开。\n")
                 return 3
@@ -682,10 +680,27 @@ def build_parser() -> argparse.ArgumentParser:
     ing.set_defaults(func=cmd_ingest_briefing)
 
     daily = sub.add_parser("daily", help="生成日报（默认规则；--with-model 才尝试本地模型）")
-    daily.add_argument("--date", help="YYYY-MM-DD，默认本机时区今天")
+    daily.add_argument("--date", help="YYYY-MM-DD，表示该日配置截止时间结束的窗口；默认今天")
     daily.add_argument("--with-model", action="store_true")
-    daily.add_argument("--scheduled", action="store_true", help="21:30 调度：无新证据不加载模型")
+    daily.add_argument("--scheduled", action="store_true", help="补齐已截止的日报窗口；每窗口仅提醒一次")
     daily.set_defaults(func=cmd_daily)
+
+    projects = sub.add_parser("projects", help="个人仓库候选、覆盖及日报配置")
+    projects.add_argument("action", choices=["discover", "coverage", "configure"])
+    projects.add_argument("--root", action="append", help="个人目录，可重复；configure 时替换目录清单")
+    projects.add_argument("--date", help="coverage：该日截止的日报窗口")
+    projects.add_argument("--project", help="configure：要调整的项目")
+    projects.add_argument("--worktrees", choices=["registered", "prefixes", "all"])
+    projects.add_argument("--time", help="configure：日报截止时间 HH:MM")
+    projects.add_argument("--timezone", help="configure：例如 Asia/Taipei")
+    projects.add_argument("--notify", choices=["on", "off"])
+    projects.set_defaults(func=cmd_projects)
+
+    features = sub.add_parser("features", help="查看功能目录或保存中文名称及匹配规则的修正")
+    features.add_argument("action", choices=["show", "set"])
+    features.add_argument("--project", required=True)
+    features.add_argument("--file", help="set：经确认的功能目录 JSON；只保存到小猫数据目录")
+    features.set_defaults(func=cmd_features)
 
     ho = sub.add_parser("handoff", help="生成交接材料")
     ho.add_argument("--project", required=True)
@@ -726,11 +741,13 @@ def build_parser() -> argparse.ArgumentParser:
     lat.add_argument("kind", choices=["daily", "handoff", "status"])
     lat.add_argument("--project", help="handoff 多项目时必填")
     lat.add_argument("--print", action="store_true", dest="print")
+    lat.add_argument("--details", action="store_true", help="daily：读取同一版本的完整依据")
     lat.set_defaults(func=cmd_latest)
 
     op = sub.add_parser("open", help="用系统 open 打开最新报告")
     op.add_argument("kind", choices=["daily", "handoff", "status"])
     op.add_argument("--project", help="handoff 多项目时必填")
+    op.add_argument("--details", action="store_true", help="daily：打开同一版本的完整依据")
     op.set_defaults(func=cmd_open)
 
     he = sub.add_parser("health", help="运行健康与调度状态")
@@ -740,6 +757,8 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("action", choices=["start", "status", "archive"])
     pi.add_argument("--reason", help="archive：结束本轮但不给通过 / 不通过结论的原因（必填）")
     pi.set_defaults(func=cmd_pilot)
+    from xiaomao.document_commands import add_parser as add_document_parser
+    add_document_parser(sub)
     return p
 
 

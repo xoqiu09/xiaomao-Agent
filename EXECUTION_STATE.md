@@ -1,11 +1,16 @@
 # 小猫当前运行说明
 
+## 日报升级候选（2026-10-02）
+
+本分支增加固定窗口的跨仓库日报、内容指纹/差异证据、逐项目本地解读、补报和一次提醒。数据库采用增量 schema 3。此次仅候选源码与隔离验收，尚未切换正式 release、plist、launchd、SwiftBar 或正式配置。下面的运行描述保留为先前记录，不表示本候选已经启用。发布方式见 [日报升级说明](docs/DAILY_UPGRADE.md)。
+
+
 核对时间：2026-09-30（Asia/Taipei）。**第一轮 Pilot 已 PILOT_ARCHIVED（观察范围不足，无稳定性结论）。**
 
 ## 源码、程序与数据身份
 
 - 仓库：`/Users/xiuqiu/WorkSpace/xiaomao-Agent`，`main`，无 remote。原隔离源码 `~/.codex/worktrees/a45f/xiaomao-Agent` 已不存在，分支 `codex/xiaomao-latest-handoff` 已并入 main。
-- 现用程序：两个 LaunchAgent 与 SwiftBar 插件链接都指向本仓工作区（09-23 起）。计划改为固定 tag 的独立 checkout，切换前本仓工作区即运行代码，不要在 main 上留未验收改动。
+- 现用程序：自 2026-10-01 起，两个 LaunchAgent 与 SwiftBar 插件链接指向固定 checkout `~/Library/Application Support/Xiaomao/release/v0.1.1`（tag `v0.1.1`，detached，`git worktree` 登记）。本仓 main 上的改动不影响正式运行；升级＝新建下一个 tag 目录、在其中跑隔离验收、再切 plist 与插件链接。切换前的 plist 与链接备份在 `backups/launchagents-20261001-104529/`。
 - 运行 Python：`/Users/xiuqiu/.local/bin/python3.11`，包版本 `0.1.0`；SwiftBar `2.1.1 (597)`。
 - 正式数据：`~/Library/Application Support/Xiaomao/`，SQLite schema 2。模型目录在外盘 `/Volumes/LocalDevData/Xiaomao/ollama`。
 

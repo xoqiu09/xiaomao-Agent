@@ -80,6 +80,7 @@ def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30) -
             timeout=timeout,
             env=_git_env(),
             shell=False,
+            errors="replace",
         )
     except subprocess.TimeoutExpired as exc:
         raise GitReadError(f"git timed out: {args[0] if args else argv}", argv=argv) from exc
@@ -135,6 +136,8 @@ class GitSnapshot:
     last_commit_at: str | None = None
     recent_subjects: list[str] = field(default_factory=list)
     module_digest: dict[str, list[str]] = field(default_factory=dict)
+    content_changes: list[dict] = field(default_factory=list)
+    evidence_limitations: list[str] = field(default_factory=list)
 
     @property
     def staged(self) -> list[StatusEntry]:
@@ -274,6 +277,8 @@ def collect_snapshot(worktree: Path) -> GitSnapshot:
         error = "HEAD changed during scan"
 
     last_commit_at, recent_subjects, module_digest = collect_module_digest(worktree)
+    from xiaomao.change_evidence import workspace_evidence
+    content_changes, evidence_limitations = workspace_evidence(worktree, entries, post_head)
 
     return GitSnapshot(
         toplevel=toplevel,
@@ -292,6 +297,8 @@ def collect_snapshot(worktree: Path) -> GitSnapshot:
         last_commit_at=last_commit_at,
         recent_subjects=recent_subjects,
         module_digest=module_digest,
+        content_changes=content_changes,
+        evidence_limitations=evidence_limitations,
     )
 
 
@@ -321,7 +328,8 @@ def collect_module_digest(
     )
     if subj.returncode == 0:
         for line in subj.stdout.splitlines():
-            text = line.strip()
+            from xiaomao.change_evidence import safe_text
+            text = safe_text(line.strip(), 500)
             if text and text not in subjects:
                 subjects.append(text)
             if len(subjects) >= subject_limit:
@@ -372,6 +380,10 @@ def snapshot_fingerprint(snap: GitSnapshot) -> str:
         "detached": snap.is_detached,
         "unborn": snap.is_unborn,
         "last_commit_at": snap.last_commit_at,
+        "content": [
+            {k: item.get(k) for k in ("path", "status", "content_hash", "index_hash", "availability")}
+            for item in snap.content_changes
+        ],
         "status": [
             {
                 "s": e.staged,

@@ -237,6 +237,8 @@ def _read_state(home: Path, project_ids: list[str]) -> dict[str, Any]:
                       w.worktree_id AS worktree_id,
                       w.project_id AS project_id,
                       w.scan_enabled AS scan_enabled,
+                      w.notes AS notes,
+                      o.branch_ref AS branch_ref,
                       o.collection_status AS collection_status,
                       o.staged_count AS staged_count,
                       o.unstaged_count AS unstaged_count,
@@ -327,7 +329,7 @@ def _alerts(state: dict[str, Any], *, stale: bool) -> list[str]:
             continue
         # A collection error is reported even for a menu-quieted project.
         if _row_get(row, "collection_status") == "error":
-            items.append(f"{_row_get(row, 'worktree_id') or 'unknown'} 采集状态：error")
+            items.append(f"{_tree_label(row)} 采集状态：error")
     return _dedupe(items)
 
 
@@ -355,6 +357,16 @@ def _sample_names(row: sqlite3.Row | None, limit: int = 2) -> list[str]:
     return names
 
 
+def _tree_label(row) -> str:
+    """Branch-prefix trees have hashed ids; show project + branch instead."""
+    wid = _row_get(row, "worktree_id") or "unknown"
+    if _row_get(row, "notes") == "branch_prefix":
+        branch = str(_row_get(row, "branch_ref") or "").removeprefix("refs/heads/")
+        if branch:
+            return f"{_row_get(row, 'project_id') or wid} · {branch}"
+    return wid
+
+
 def _dirty_inventory(state: dict[str, Any], quiet_projects: set[str]) -> list[str]:
     """Uncommitted-work inventory, skipping projects quieted in config."""
     items: list[str] = []
@@ -371,7 +383,7 @@ def _dirty_inventory(state: dict[str, Any], quiet_projects: set[str]) -> list[st
         counts = f"staged {staged} / unstaged {unstaged} / untracked {untracked}"
         sample = "、".join(_sample_names(row))
         tail = f"　{sample}" if sample else ""
-        items.append(f"{_row_get(row, 'worktree_id') or 'unknown'} 未提交（{counts}）{tail}")
+        items.append(f"{_tree_label(row)} 未提交（{counts}）{tail}")
     return _dedupe(items)
 
 
@@ -414,14 +426,16 @@ def _briefing_sections(
     state: dict[str, Any],
     *,
     now: datetime | None = None,
+    cfg=None,
 ) -> tuple[list[str], list[str], bool]:
     """Prefer the already-written menu briefing; else reconstruct from facts."""
     path = latest_menu_briefing(home)
-    if path is not None:
+    if path is not None and cfg is not None:
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            text = ""
+            from xiaomao.report_access import read_bound_report
+            text = read_bound_report(path, home, cfg, "briefing")
+        except (OSError, ValueError, KeyError, TypeError):
+            return ["日报摘要范围未核实，请重新生成。"], [], False
         if text:
             today, idle, model_used = parse_menu_briefing(text)
             if today or idle:
@@ -472,7 +486,7 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     alerts = _alerts(state, stale=stale)
     quiet_projects = {p.project_id for p in projects if p.menu_hide_dirty}
     dirty = _dirty_inventory(state, quiet_projects)
-    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc)
+    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc, cfg=cfg)
     daily = latest_daily(home)
     reports = reports_dir(home)
     scan_outcome = _row_get(last_run, "outcome")
@@ -521,6 +535,12 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     daily_stamp = _daily_stamp(daily, tz, now_local)
     if daily_verified:
         lines.append(f"打开日报 {_escape(daily.stem)}　{_escape(daily_stamp)} | href={file_href(daily)}")
+        try:
+            from xiaomao.report_access import read_daily_details
+            evidence, _ = read_daily_details(daily, home, cfg)
+            lines.append(f"查看日报依据 | href={file_href(evidence)}")
+        except (ValueError, OSError):
+            lines.append("日报依据尚未生成或版本未核实")
     elif daily is not None:
         lines.append(f"最新日报范围未核实（旧文件保留，需重新生成）　{_escape(daily_stamp)}")
     else:

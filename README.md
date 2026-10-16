@@ -2,6 +2,23 @@
 
 本机只读工程观察员：采集已登记个人项目的 Git 磁盘状态，生成日报与交接，并在 CLI / SwiftBar 里显示资料来源、时间和未核实项。采集不加载模型；模型只接收程序筛选的事实，没有 shell、Git 或数据库写入工具。
 
+## 随时保存文档与交接
+
+`xiaomao docs` 可以保存明确提交的 Markdown / 文本文档，按关键词找回，追加带来源和版本的阶段说明，并导出包含原文与全部交接的 Markdown。保存不调用模型，旧版本保留。
+
+可选 MCP 入口让 Codex、Claude Code 共用同一份本地文档库；附两端接入配置生成命令和 `xiaomao-handoff` 调用技能。安装、使用与验证边界见 [文档交接说明](docs/DOCUMENT_HANDOFF.md)。
+
+## 每日跨仓库总结
+
+默认汇总 **Asia/Taipei 前一日 21:30 至当日 21:30**，正文为「今日总览 → 各项目变化 → 尚未提交的工作 → 采集缺口」。支持提交后 clean、连续编辑同一文件、多工作树及副本去重、逐项目本地解读和错过调度后的补报。
+
+    python3.11 -m xiaomao daily --date 2026-10-02
+    python3.11 -m xiaomao latest daily --print
+    python3.11 -m xiaomao projects discover --root /Users/xiuqiu/PersonalProjects
+    python3.11 -m xiaomao projects coverage --date 2026-10-02
+
+--date 表示该日截止的窗口，提前生成标为预览。首次观察只建基线；没有当日新变化的遗留修改只列为仍在进行。配置、预算、提醒、迁移和发布方式见 [每日总结升级说明](docs/DAILY_UPGRADE.md)。
+
 ## 查看最新交接
 
 在本仓根目录运行（Python 3.11+，核心无第三方依赖）：
@@ -32,7 +49,14 @@ python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 
 正式数据在 `~/Library/Application Support/Xiaomao/`；全局 `--home PATH` 可覆盖。配置文件是 `config.json`，SQLite 为 `xiaomao.sqlite`，报告在 `reports/daily/`、`reports/handoff/`、`reports/projects/`、`reports/briefing/`。
 
-默认只保留既有六项登记：QAI、wallet-core、xiaomao-Agent、xiuqiu-site、AI-Web3-Learning、Wallet-Infrastructure。新树不会自动获得权限，`projects: []` 不会扩回默认清单。
+默认只保留既有六项登记：QAI、wallet-core、xiaomao-Agent、xiuqiu-site、AI-Web3-Learning、Wallet-Infrastructure。旧配置不会自动扩大范围；显式配置 personal_roots 后识别已确认个人仓库，worktree_policy=all 可纳入同仓普通分支和 detached 开发树。未知来源只列候选。`projects: []` 不会扩回默认清单。
+
+可选的分支前缀观察：在项目里加 `"branch_prefixes": ["codex/"]` 后，扫描主树时会读取同一仓库的 `git worktree list`，分支名以这些前缀开头的其他工作树会被一并只读采集。约束如下：
+- detached、bare、目录已删除（prunable）的树不纳入；路径命中排除规则、或已不属于同一仓库的树不采集。
+- 这些树不写回 `config.json`，不计入交接的范围哈希、交接覆盖和 `scan_runs` 结果；它们出错也不会把项目扫描判为失败。
+- 之前纳入的树从列表里消失后，记一条 `worktree_gone` 事件并停止观察，不算错误。
+- 日报的「查看依据」列出其他工作树的分支、HEAD、观察时间和未提交状态。正文按功能归并；菜单的技术详情仍可按树查看。
+默认为空，即不观察其他树。
 
 公司项目（包括 theAIapp-service 各树、event-services-chooseme-event）、已登记的退役路径、`_待删除旧项目_2026-09-22` 归档以及 Stats / AgentNotch / TokenMonitor 第三方工具不进入活动采集。兼容链接和 Git 的 `.git` / `commondir` 指针也受检查；只检查有限元数据，命中排除目标即停止。完全改名且没有可识别来源指针的独立克隆仍需要维护者明确识别并排除。
 
@@ -42,7 +66,7 @@ python3.11 -m xiaomao latest handoff --project xiaomao-Agent --print
 
 插件为 `scripts/swiftbar/xiaomao.1m.sh`，每分钟刷新。刷新本身不采集、不加载模型。菜单栏没事时只有小八的猫头（`image=` 彩色 PNG）；扫描过期显示「信息已过期」，最近一次扫描失败显示「扫描失败」。缺少或落后的交接不改标题——那不是扫描故障。
 
-点开菜单先看「今天」和「很久没看」：说的是模块和上次提交距今多久，不列文件名。「很久没看」只看上次提交日期，不假装知道文件夹有没有被打开过。没有模型解读时菜单会标明。
+菜单优先显示标明窗口及覆盖情况的功能短句，与完整正文使用同一份证据包及功能记录。「查看日报依据」打开提交、工作树、代码片段及功能解读的原文支持。菜单、正文、依据版本不一致时不提供已核实入口。没有有效日报时保留原有模块与提交时间显示；新日报不重新判断历史活跃度。
 
 菜单其余分层：
 
@@ -59,18 +83,35 @@ SQLite 使用 `mode=ro` / `query_only` 读取，不修改应用记录或报告�
 ## 调度、模型与 Pilot
 
 - `ai.xiaomao.scan`：300 秒一次，扫描当前登记范围，完全不加载模型；任何树失败、排除、暂停或没有实际结果，CLI 都不报整体成功。
-- `ai.xiaomao.daily`：本机时区 21:30，`daily --scheduled`。这是唯一会自动加载模型的入口：某棵启用树有未提交改动、且同一证据快照没有通过校验的旧摘要时，才调用 `qwen3-coder:30b`；否则只出规则文本。`pause infer` 可关掉这条。
-- 项目说明消化：`ingest-briefing`（可加 `--project ID`）。只读已授权项目在 `briefing_docs_root` 下的 `00-项目说明.md`，切块后用深度模型压成 `reports/briefing/{id}.json`。总doc 本身不是工作树；扫描 / SwiftBar / `latest` 不读说明、不加载模型。`00` 未改则跳过。
-- 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载新模型。解读只带上述压缩 JSON 作不可信附加材料，不现场重读整份说明。静态审查缺口不等于今天测过或已上线。
+- `ai.xiaomao.daily`：按 Asia/Taipei 21:30 窗口运行 `daily --scheduled`，候选调度描述增加启动及每 300 秒遗漏检查，每次补最多 7 个窗口。有变化的项目分别调用已有本地模型；同证据复用摘要，失败保留规则日报。模型在采集事务和锁之外运行。每个窗口只尝试一次 macOS 提醒。
+- 项目说明消化：`ingest-briefing`（可加 `--project ID`）。只读已授权项目在 `briefing_docs_root` 下的 `00-项目说明.md`，切块后用深度模型压成 `reports/briefing/{id}.json`。总doc 本身不是工作树；扫描可校验并复用该压缩背景和有界 README，不调用模型。SwiftBar / `latest` 只读保存的结果。`00` 未改则跳过消化。
+- 手动模型解读：`daily --with-model` 或 `handoff --project ID --with-model`。默认深度 `qwen3-coder:30b`，`keep_alive=0`，失败降级；不切云端、不下载模型。日报使用经过脱敏的窗口证据，交接可继续使用压缩项目说明。测试与部署仍须独立证据。
 - `pause infer` / `resume infer`：控制推理；`pause scan` / `resume scan`：控制本系统任务。Pilot 起算和历史记录保留。
 - `pilot start` / `pilot status` / `pilot archive --reason TEXT`：归档结束当前一轮，不给通过或不通过结论；本轮元数据和窗口计数写入 `pilot_archived` 事件，扫描历史不动。归档后再 `start` 从当时重新起算。
 
 第一轮 Pilot（2026-09-21 起）已于 2026-09-30 **PILOT_ARCHIVED**：只观察各仓主树，实际开发多在其他工作树，无法判断稳定性。不是 STABILITY_PASSED。CLI 回归、菜单运行、一次真实扫描都不能代替多日稳定性证据。
 
+## 按功能阅读日报
+
+正文固定为「今日总览 → 各项目功能变化 → 仍在推进的功能 → 待确认与采集缺口」。同一功能涉及多文件或提交时合并呈现，一笔提交涉及不同功能时拆开；每项目优先显示最多 5 项，完整条目保存在依据中。已提交和正式启用分别判断，作者来自 Git 证据。
+
+```bash
+xiaomao daily --with-model
+xiaomao latest daily --print
+xiaomao latest daily --details --print
+xiaomao open daily --details
+xiaomao features show --project PROJECT_ID
+```
+
+功能解释使用当时保存的项目背景与代码片段。缺少上下文、模型不可用或输出不受证据支持时，正文明确写「功能影响待确认」。规则摘要仍保留功能归属、提交状态和全部依据。功能名称可通过 `features set --project PROJECT_ID --file catalog.json` 修正，从后续采集生效；格式、限制和语义验收见 [功能日报说明](docs/FUNCTIONAL_DAILY.md)。
+
 ## 开发与验收
 
 ```bash
-PYTHONPATH=src python3.11 scripts/accept.py --isolated
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --no-deps --editable .
+.venv/bin/python -m unittest discover -s tests
+.venv/bin/python scripts/accept.py --isolated
 ```
 
 该入口默认就使用临时 HOME、临时数据目录和真实临时 Git worktree；包含全套 unittest、两次扫描幂等、业务文件 / index / hooks 不变、日报、交接查询和本仓 worktree 身份。退出 `0` 仅表示六个隔离门通过；正式 home 与外盘身份两门明确 `NOT_RUN`，`full_live_acceptance=false`。

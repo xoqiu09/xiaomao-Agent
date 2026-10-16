@@ -1,12 +1,15 @@
 [project]
 name = "xiaomao-agent"
-version = "0.1.0"
+version = "0.2.2"
 description = "小猫：本机只读工程观察员（采集与推理解耦）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "xiaomao" }]
 dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=2.2,<3"]
 
 [project.scripts]
 xiaomao = "xiaomao.cli:main"
