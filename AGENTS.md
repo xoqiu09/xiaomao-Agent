@@ -13,9 +13,8 @@
 
 ## 源码与运行身份
 
-- 优化目录：`/Users/xiuqiu/WorkSpace/xiaomao-Agent-optimization`。
-- 初始分支：`codex/xiaomao-optimization-20261013`，起点为 `v0.2.2`，完整提交 `adc2bf988b462da5498a21321a044a938139a061`。
-- 原开发目录：`/Users/xiuqiu/WorkSpace/xiaomao-Agent`。该目录与 `PersonalProjects` 下的旧副本使用各自分支，不能代替本目录的优化成果。
+- 开发目录：`/Volumes/LocalDevData/Projects/WorkSpace/xiaomao-Agent`（`~/WorkSpace/xiaomao-Agent`）。2026-10-26 起 `main` 是唯一主线，新工作从 `main` 切分支或 worktree。
+- 原优化目录 `xiaomao-Agent-optimization`、`PersonalProjects` 副本和云端仓库 `xiaomao-agent-cloud` 已停用，其内容已并入 `main`。
 - 2026 年 10 月 13 日核对时，正式调度指向 `/Users/xiuqiu/Library/Application Support/Xiaomao/release/v0.2.2`。源码中的 `EXECUTION_STATE.md` 尚有旧版本说明；运行状态须重新核对。
 - 当前远端为个人仓库 `xoqiu09/xiaomao-Agent`。提交、推送、合并与切换正式安装分别记录；整体体检不包含这些动作。
 
