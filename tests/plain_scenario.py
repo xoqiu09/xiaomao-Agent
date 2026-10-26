@@ -59,7 +59,7 @@ def scan(cfg, at: str) -> None:
 
 
 def make_day(cfg, repos) -> None:
-    scan(cfg, "2026-10-01T13:00:00+00:00")
+    scan(cfg, "2026-10-01T13:40:00+00:00")  # just after the 10-01 cutoff
     site, wallet, notes = repos["site"], repos["wallet"], repos["notes"]
     # site: merged into main, pushed feature branch, local-only commit, dirty file.
     _commit(site, "filters.py", "def clear_filters():\n    return []\n", "筛选可一键清除", "2026-10-02T02:00:00+00:00")
