@@ -57,6 +57,9 @@ class PlainReportTests(unittest.TestCase):
 
     def test_quiet_projects_and_next_steps(self):
         self.assertIn("今天没动：旷野之心", self.body)
+        # Only baselines and collection intervals here: nothing failed, no issue line.
+        self.assertNotIn("采集问题", self.body)
+        self.assertIn("首次观察只建立基线", self.evidence)
         steps = self.body.split("明天从这里继续\n", 1)[1].split("\n\n", 1)[0].splitlines()
         self.assertTrue(2 <= len(steps) <= 3)
         self.assertIn("推送本地的 1 个提交", steps[0])
@@ -78,13 +81,18 @@ class PlainReportTests(unittest.TestCase):
                                  "evidence_id": f"commit:r{i}:{s}", "files": []} for n, s in enumerate(shas)],
                     "ongoing": [{"tree_id": "t", "files": [{"path": f"f{n}.py"} for n in range(dirty)],
                                  "observation_id": f"o{i}"}] if dirty else [],
-                    "gaps": ["该窗口没有扫描覆盖证据"] * 3, "limitations": ["a.py: diff_truncated"] * 4,
+                    # Routine gaps (not counted) plus one real scan failure per project.
+                    "gaps": ["首次接入或缺少窗口起点基线；此前未提交修改不可恢复",
+                             "采集缺口：2026-10-13T01:00:00+00:00 → 2026-10-13T03:00:00+00:00",
+                             f"t{i}: 采集 error"],
+                    "limitations": ["a.py: diff_truncated", "b.py: metadata_only", "c.py: unreadable"],
                     "delivery_state": {"has_remote": has_remote, "default_ref": "refs/remotes/origin/main",
                                        "default_basis": "remote_head", "errors": [],
                                        "commits": {s: states[n % 3] if has_remote else "local"
                                                    for n, s in enumerate(shas)},
                                        "unpushed": shas[2::3], "dirty_files": dirty, "dirty_trees": 1 if dirty else 0}}
-        bundle = {"window": {"date": "2026-10-13"}, "preview": False, "inventory_errors": ["x"] * 5,
+        bundle = {"window": {"date": "2026-10-13"}, "preview": False,
+                  "inventory_errors": ["/x: inventory_depth_limit", "p1: /y: worktree_metadata_unavailable"],
                   "candidates": [{"path": "/x"}],
                   "projects": [project(1, 12, 72), project(2, 9, 3), project(3, 4, 0, has_remote=False),
                                project(4, 2, 1), project(5, 0, 0), project(6, 0, 0), project(7, 0, 0)]}
@@ -95,6 +103,9 @@ class PlainReportTests(unittest.TestCase):
         for term in BANNED_TERMS:
             self.assertNotIn(term, text)
         self.assertIn("今天没动：项目5、项目6、项目7", text)
+        # 7 scan errors + 7 unreadable files + 1 inventory read failure = 15;
+        # baselines, intervals, truncation, depth limit and candidates are not counted.
+        self.assertIn("15 处采集问题，详见依据 → 菜单「查看依据」", lines)
         self.assertEqual(sum("采集问题" in l for l in lines), 1)
         self.assertIn("· 项目4：", text)                 # 4th active project folded to one line
         self.assertIn("72 处未提交改动，建议分批提交", text)

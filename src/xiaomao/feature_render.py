@@ -316,12 +316,26 @@ def plain_next_steps(bundle):
     return [s[1] for s in firsts + [s for s in steps if s not in firsts]]
 
 
+# Only real failures are counted in the plain report (user decision
+# 2026-10-26): scan errors, read failures, missing model interpretation.
+# Baselines, collection intervals, truncation, redaction and unregistered
+# candidates stay listed in the evidence file but are not counted.
+FAILED_GAP_MARKERS = ("采集 error", "采集 inconsistent", "repository_identity_unavailable", "日报证据采集失败")
+FAILED_LIMITATION_MARKERS = ("commit_history_unavailable", ": unreadable")
+FAILED_INVENTORY_MARKERS = ("unavailable", "git_metadata_timeout", "invalid_git_metadata", "invalid_project_path",
+                            "另一次扫描仍在进行")
+# A paused model or a day with nothing to interpret is not a failure.
+MODEL_MISSING = {"本地模型不可用或未启用", "模型调用失败", "输出未通过证据校验", "达到存储预算，保留规则证据"}
+
+
 def _issue_count(bundle, notes):
-    count = len(bundle["inventory_errors"]) + len(bundle["candidates"])
+    count = sum(any(m in e for m in FAILED_INVENTORY_MARKERS) for e in bundle["inventory_errors"])
     for project in bundle["projects"]:
-        count += len(project["gaps"]) + len(project["limitations"])
-        count += len((project.get("delivery_state") or {}).get("errors", []))
-        count += bool(notes.get(project["repo_id"], {}).get("error"))
+        count += sum(any(m in g for m in FAILED_GAP_MARKERS) for g in project["gaps"])
+        count += sum(any(m in item for m in FAILED_LIMITATION_MARKERS) for item in project["limitations"])
+        # A project whose worktrees are all gone is not a read failure.
+        count += sum(e != "no_live_tree" for e in (project.get("delivery_state") or {}).get("errors", []))
+        count += notes.get(project["repo_id"], {}).get("error") in MODEL_MISSING
     return count
 
 

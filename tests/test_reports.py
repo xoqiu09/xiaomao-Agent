@@ -45,7 +45,8 @@ class ReportCliTests(unittest.TestCase):
         body = (home / "reports" / "daily" / "2026-09-20.txt").read_text(encoding="utf-8")
         # The body is the plain evening report: no technical wording, gaps counted in one line.
         self.assertTrue(body.startswith("小猫晚报 · 9月20日（周日）\n"))
-        self.assertIn("采集问题，详见依据", body)
+        # A missing scan baseline is not a failure: no issue line in the body.
+        self.assertNotIn("采集问题", body)
         self.assertNotIn("未核实", body)
         self.assertNotIn("partial", body)
         # The evidence keeps the rigorous wording unchanged.
