@@ -19,6 +19,7 @@ from xiaomao.store import (
     last_scan_success,
     latest_observation,
     record_discovered_worktree,
+    release_write,
     scan_paused,
     utc_now,
     upsert_project,
@@ -149,6 +150,9 @@ def scan_worktree(
         }
     path = Path(wt.path).expanduser()
     observed_at = utc_now()
+    # Earlier rows are complete; commit them so Git reads below never hold
+    # the SQLite write lock (the source of `database is locked`).
+    release_write(conn)
     try:
         from xiaomao.inventory import metadata
         identity = metadata(str(path))
@@ -521,6 +525,7 @@ def scan_prefix_worktrees(conn, cfg: AppConfig, project: ProjectSpec) -> list[di
     """Observe branch-prefix trees. Never affects the project's scan outcome."""
     if not project.branch_prefixes:
         return []
+    release_write(conn)
     snap = _main_snapshot(project)
     if snap is None:
         return []

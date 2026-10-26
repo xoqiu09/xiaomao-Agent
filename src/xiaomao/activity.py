@@ -64,7 +64,13 @@ def _frontier(path: Path, head: str | None) -> list[str]:
 
 def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_id: str) -> None:
     from xiaomao.ops import storage_over_budget
+    from xiaomao.store import release_write
 
+    # Git commands and file reads below must not run inside a write
+    # transaction, or every other entry waits and fails with
+    # `database is locked`.
+    release_write(conn)
+    queued = []
     observed_at = stamp(observed_at)
     path = Path(wt.path)
     info = metadata(wt.path)
@@ -94,6 +100,7 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
         else:
             pending = listing.stdout.split()
             for oid in pending[:COMMIT_BATCH]:
+                # Reads and Git only here; writes are queued for one short transaction.
                 cached = conn.execute("SELECT payload_json FROM daily_commits WHERE repo_id=? AND sha=?",
                                       (repo_id, oid)).fetchone()
                 facts = json.loads(cached[0]) if cached else commit_evidence(path, oid)
@@ -114,13 +121,15 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
                     facts = dict(facts, files=[{k: v for k, v in dict(f, patch="").items()
                                                if k not in {"units", "snapshot"}} for f in facts["files"]])
                     facts["limitations"] = [*facts["limitations"], "storage_budget"]
-                conn.execute("INSERT OR IGNORE INTO daily_commits VALUES (?,?,?)",
-                             (repo_id, oid, json.dumps(facts, ensure_ascii=False)))
-                conn.execute("INSERT OR IGNORE INTO daily_commit_links VALUES (?,?,?,?,?,?)",
-                             (repo_id, oid, wt.worktree_id, key, observed_at, effective))
+                queued.append((oid, facts, effective))
             if len(pending) > COMMIT_BATCH:
                 frontier = sorted(set(known + pending[:COMMIT_BATCH]))
                 state["limitations"].append(f"commit_backlog: {len(pending) - COMMIT_BATCH}")
+    for oid, facts, effective in queued:
+        conn.execute("INSERT OR IGNORE INTO daily_commits VALUES (?,?,?)",
+                     (repo_id, oid, json.dumps(facts, ensure_ascii=False)))
+        conn.execute("INSERT OR IGNORE INTO daily_commit_links VALUES (?,?,?,?,?,?)",
+                     (repo_id, oid, wt.worktree_id, key, observed_at, effective))
     state_json = json.dumps(state, sort_keys=True, ensure_ascii=False)
     old_state = json.loads(previous["state_json"]) if previous else None
     if previous is None or state != old_state:

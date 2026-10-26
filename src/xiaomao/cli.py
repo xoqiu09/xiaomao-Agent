@@ -23,6 +23,7 @@ from xiaomao.store import (
     latest_by_project,
     latest_summary_for_range,
     open_db,
+    open_db_readonly,
     utc_now,
 )
 
@@ -157,7 +158,7 @@ def cmd_status(ns: argparse.Namespace) -> int:
     if not db.exists():
         sys.stderr.write("数据库不存在。先运行：xiaomao init 或 xiaomao scan\n")
         return 2
-    with open_db(db) as conn:
+    with open_db_readonly(db) as conn:
         text = status_text(conn, cfg, ns.project)
         if ns.write_report:
             rows = authorized_rows(conn, cfg.project(ns.project))
@@ -577,7 +578,7 @@ def cmd_health(ns: argparse.Namespace) -> int:
         lines.append("数据库不存在。先运行 xiaomao init")
         sys.stdout.write("\n".join(lines) + "\n")
         return 2
-    with open_db(db) as conn:
+    with open_db_readonly(db) as conn:
         last = last_scan_success(conn)
         lines.append(f"最近一次扫描成功：{last['finished_at'] if last else '尚无'}")
         lines.append(f"推理暂停：{'是' if infer_paused(conn) else '否'}")

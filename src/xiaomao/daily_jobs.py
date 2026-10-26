@@ -17,6 +17,10 @@ from xiaomao.store import open_db, utc_now
 from xiaomao.feature_daily import (PROMPT_VERSION, SYSTEM, model_packet, prepare_inference,
                                    inference_schema, expand_inference, validate_records)
 MAX_CATCHUP = 7
+# Longest observed full scan is ~3 minutes; the daily waits at most this long
+# for the collection lock, then publishes from the latest stored collection.
+LOCK_WAIT_S = 90
+LOCK_BUSY_NOTE = "生成时另一次扫描仍在进行，本次使用最近一次采集结果"
 
 
 def _hash(value) -> str:
@@ -225,7 +229,8 @@ def preserve_report(path: Path, text: str) -> None:
 
 
 def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
-              client_factory=None, notifier=macos_notification) -> list[Path]:
+              client_factory=None, notifier=macos_notification,
+              lock_wait_s=LOCK_WAIT_S) -> list[Path]:
     from xiaomao.collect import scan_authorized
     from xiaomao.config import load_config
     from xiaomao.inventory import effective_config
@@ -242,9 +247,18 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
                 date or now.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()]
         if not dates:
             return []
-        with ScanLock(paths["lock"], retries=5, retry_s=1), open_db(paths["db"]) as conn:
-            effective = effective_config(cfg)
-            scan_authorized(conn, effective)  # final collection; contains no model calls
+        effective = effective_config(cfg)
+        try:
+            with ScanLock(paths["lock"], retries=lock_wait_s, retry_s=1), open_db(paths["db"]) as conn:
+                scan_authorized(conn, effective)  # final collection; contains no model calls
+        except RuntimeError as exc:
+            if "another xiaomao scan holds" not in str(exc):
+                raise
+            # Bounded wait: publish from the latest stored collection instead
+            # of failing; late commits later repair the window (due_dates).
+            # Surfaced as a collection gap: coverage becomes partial.
+            effective._inventory_errors = [*getattr(effective, "_inventory_errors", []), LOCK_BUSY_NOTE]
+        with open_db(paths["db"]) as conn:
             if scheduled and not date:
                 dates = due_dates(effective, conn, now)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]

@@ -327,11 +327,26 @@ def upsert_job(
     )
 
 
+def schema_current(conn: sqlite3.Connection) -> bool:
+    """Read-only check; a current schema needs no DDL or meta write."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None and row["value"] == SCHEMA_VERSION
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    # Only first use or a schema upgrade takes the write lock for DDL.
+    if not schema_current(conn):
+        init_db(conn)
+
+
 @contextmanager
 def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn = connect(db_path)
     try:
-        init_db(conn)
+        ensure_schema(conn)
         yield conn
         conn.commit()
     except Exception:
@@ -339,6 +354,29 @@ def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+@contextmanager
+def open_db_readonly(db_path: Path, *, busy_ms: int = 1500) -> Iterator[sqlite3.Connection]:
+    """Query-only connection: never runs schema setup or application writes.
+
+    Under WAL a reader is not blocked by an open write transaction; the
+    bounded busy timeout only covers checkpoint/recovery moments.
+    """
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=busy_ms / 1000)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute(f"PRAGMA busy_timeout={int(busy_ms)}")
+        yield conn
+    finally:
+        conn.close()
+
+
+def release_write(conn: sqlite3.Connection) -> None:
+    """End the current write transaction before slow Git or file work."""
+    if conn.in_transaction:
+        conn.commit()
 
 
 def upsert_project(conn: sqlite3.Connection, project_id: str, display_name: str, approved_root: str, policy_version: str) -> None:
