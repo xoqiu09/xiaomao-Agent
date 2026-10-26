@@ -42,7 +42,14 @@ class ReportCliTests(unittest.TestCase):
             self.assertEqual(main(["--home", str(home), "handoff", "--project", "website"]), 0)
         out = buf.getvalue()
         self.assertIn("reports/daily/2026-09-20.txt", out.replace("\\", "/"))
-        daily = (home / "reports" / "daily" / "2026-09-20.txt").read_text(encoding="utf-8")
+        body = (home / "reports" / "daily" / "2026-09-20.txt").read_text(encoding="utf-8")
+        # The body is the plain evening report: no technical wording, gaps counted in one line.
+        self.assertTrue(body.startswith("小猫晚报 · 9月20日（周日）\n"))
+        self.assertIn("采集问题，详见依据", body)
+        self.assertNotIn("未核实", body)
+        self.assertNotIn("partial", body)
+        # The evidence keeps the rigorous wording unchanged.
+        daily = (home / "reports" / "daily-evidence" / "2026-09-20.txt").read_text(encoding="utf-8")
         self.assertIn("本报告由规则程序生成", daily)
         self.assertIn("测试：unknown", daily)
         self.assertIn("该窗口没有扫描覆盖证据", daily)

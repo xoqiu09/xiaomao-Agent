@@ -257,8 +257,18 @@ def isolated_checks(root: Path, env: dict[str, str], report: dict) -> None:
     for kind in ("daily", "handoff"):
         args = [kind] if kind == "daily" else [kind, "--project", PROJECT]
         generated = run([*cli, *args], env=env)
-        summary_required = ("各项目功能变化", "仍在推进的功能", "待确认与采集缺口", *required[2:])
+        # The daily body is the plain evening report (core plan §3); the full
+        # functional summary and its technical headings live in the evidence.
+        summary_required = ("小猫晚报 · ", "MacBook 上还没推送的工作，小猫看不到。")
+        detail_required = (*required, "各项目功能变化", "仍在推进的功能", "待确认与采集缺口")
         evidence = report_evidence(generated, home / "reports" / kind, summary_required if kind == "daily" else required)
+        if kind == "daily" and evidence.get("path"):
+            from xiaomao.feature_render import BANNED_TERMS, PLAIN_MAX_LINES
+            body = Path(evidence["path"]).read_text(encoding="utf-8")
+            evidence["plain_rules"] = {"lines": len(body.splitlines()),
+                                       "banned_terms": [t for t in BANNED_TERMS if t in body]}
+            evidence["valid"] = (evidence["valid"] and len(body.splitlines()) <= PLAIN_MAX_LINES
+                                 and not evidence["plain_rules"]["banned_terms"])
         latest = run([*cli, "latest", kind, "--project", PROJECT], env=env)
         latest_lines = latest.stdout.strip().splitlines()
         if kind == "handoff":
@@ -272,7 +282,7 @@ def isolated_checks(root: Path, env: dict[str, str], report: dict) -> None:
             detail_path = Path(detail_lines[0]) if detail_lines else None
             details_valid = (details.returncode == 0 and detail_path is not None
                              and detail_path.parent.resolve() == (home / "reports/daily-evidence").resolve()
-                             and all(fragment in details.stdout for fragment in required))
+                             and all(fragment in details.stdout for fragment in detail_required))
             evidence["details"] = dict(command_evidence(details), valid=details_valid)
             evidence["valid"] = evidence["valid"] and details_valid
         gate(report, kind, evidence["valid"] and latest_matches and not errors,
