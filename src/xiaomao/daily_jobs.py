@@ -290,7 +290,8 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
             dest = daily_path(cfg, bundle["window"]["date"])
             if dest.parent.resolve() != Path(cfg.home).resolve() / "reports" / "daily":
                 raise ValueError("日报目录越出数据 home")
-            text = render_bundle(bundle, notes)
+            from xiaomao.feature_render import render_plain_summary
+            text = render_plain_summary(bundle, notes)
             write_details(cfg, bundle, notes)
             preserve_report(dest, text)
             _atomic_write(dest, text)
