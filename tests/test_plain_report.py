@@ -67,6 +67,39 @@ class PlainReportTests(unittest.TestCase):
         self.assertIn("依据：origin/HEAD", self.evidence)
         self.assertIn("refs/remotes/origin/trunk", self.evidence)
 
+    def test_busy_day_like_10_13_stays_within_limits(self):
+        """7 projects, dozens of commits and 72 dirty files, many gaps (10-13 shape)."""
+        def project(i, commits, dirty, has_remote=True):
+            shas = [f"{i:02d}{n:038d}" for n in range(commits)]
+            states = ["merged", "pushed", "local"]
+            return {"project_id": f"p{i}", "display_name": f"项目{i}", "repo_id": f"r{i}",
+                    "changed": bool(commits or dirty), "trees": [], "activity": [],
+                    "commits": [{"sha": s, "subject": f"功能变化 {n}：" + "很长的说明" * 20,
+                                 "evidence_id": f"commit:r{i}:{s}", "files": []} for n, s in enumerate(shas)],
+                    "ongoing": [{"tree_id": "t", "files": [{"path": f"f{n}.py"} for n in range(dirty)],
+                                 "observation_id": f"o{i}"}] if dirty else [],
+                    "gaps": ["该窗口没有扫描覆盖证据"] * 3, "limitations": ["a.py: diff_truncated"] * 4,
+                    "delivery_state": {"has_remote": has_remote, "default_ref": "refs/remotes/origin/main",
+                                       "default_basis": "remote_head", "errors": [],
+                                       "commits": {s: states[n % 3] if has_remote else "local"
+                                                   for n, s in enumerate(shas)},
+                                       "unpushed": shas[2::3], "dirty_files": dirty, "dirty_trees": 1 if dirty else 0}}
+        bundle = {"window": {"date": "2026-10-13"}, "preview": False, "inventory_errors": ["x"] * 5,
+                  "candidates": [{"path": "/x"}],
+                  "projects": [project(1, 12, 72), project(2, 9, 3), project(3, 4, 0, has_remote=False),
+                               project(4, 2, 1), project(5, 0, 0), project(6, 0, 0), project(7, 0, 0)]}
+        text = render_plain_summary(bundle, {})
+        lines = text.splitlines()
+        self.assertLessEqual(len(lines), PLAIN_MAX_LINES)
+        self.assertLessEqual(sum(l.startswith("★ ") for l in lines), 3)
+        for term in BANNED_TERMS:
+            self.assertNotIn(term, text)
+        self.assertIn("今天没动：项目5、项目6、项目7", text)
+        self.assertEqual(sum("采集问题" in l for l in lines), 1)
+        self.assertIn("· 项目4：", text)                 # 4th active project folded to one line
+        self.assertIn("72 处未提交改动，建议分批提交", text)
+        self.assertTrue(all(len(l) <= 90 for l in lines), max(lines, key=len))
+
     def test_validated_model_record_replaces_rule_line(self):
         from xiaomao.daily import build_bundle
         from xiaomao.delivery_state import annotate_bundle

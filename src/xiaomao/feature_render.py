@@ -300,14 +300,20 @@ def plain_next_steps(bundle):
     for project in bundle["projects"]:
         info = project.get("delivery_state") or {}
         name = project["display_name"]
-        if info.get("unpushed"):
-            steps.append((0, f"{name}：推送本地的 {len(info['unpushed'])} 个提交"))
+        if info.get("unpushed") and info.get("has_remote"):
+            steps.append((0, f"{name}：推送本地的 {len(info['unpushed'])} 个提交", len(info["unpushed"])))
         if info.get("dirty_files"):
             advice = "，建议分批提交" if info["dirty_files"] >= 20 else "，记得提交"
-            steps.append((1, f"{name}：{info['dirty_files']} 处未提交改动{advice}"))
-        if info.get("default_ref") and "pushed" in info.get("commits", {}).values():
-            steps.append((2, f"{name}：已推送的分支还没合进 {info['default_ref'].rsplit('/', 1)[-1]}"))
-    return [text for _, text in sorted(steps, key=lambda s: s[0])]
+            steps.append((1, f"{name}：{info['dirty_files']} 处未提交改动{advice}", info["dirty_files"]))
+        pushed = sum(s == "pushed" for s in info.get("commits", {}).values())
+        if info.get("default_ref") and pushed:
+            branch = info["default_ref"].rsplit("/", 1)[-1]
+            steps.append((2, f"{name}：已推送的分支还没合进 {branch}", pushed))
+    # Within a kind, the larger backlog first (72 dirty files before 1).
+    steps.sort(key=lambda s: (s[0], -s[2]))
+    # One step of each kind first (push, commit, merge), then the rest.
+    firsts = [next(s for s in steps if s[0] == kind) for kind in (0, 1, 2) if any(s[0] == kind for s in steps)]
+    return [s[1] for s in firsts + [s for s in steps if s not in firsts]]
 
 
 def _issue_count(bundle, notes):
