@@ -263,6 +263,10 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
                 dates = due_dates(effective, conn, now)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]
             paused = infer_paused(conn)
+        # Read-only Git ref queries, outside any database transaction.
+        from xiaomao.delivery_state import annotate_bundle
+        for bundle in bundles:
+            annotate_bundle(bundle)
         # Both SQLite and the collection lock are released before local inference.
         client = None
         if (scheduled or with_model) and not paused and any(

@@ -292,6 +292,20 @@ def project_lines(project) -> list[str]:
     return lines
 
 
+def delivery_lines(info: dict) -> list[str]:
+    """Evidence view of the four delivery states, with their basis."""
+    remote = {True: "有", False: "无（只判定未提交 / 仅本机）", None: "未能读取"}[info["has_remote"]]
+    basis = {"remote_head": "origin/HEAD", "conventional_name": "按常用名推定，未记录 origin/HEAD",
+             None: "未确定，不判定已合并"}[info["default_basis"]]
+    lines = [f"  代码位置（生成时）：远端 {remote} · 默认分支 {info['default_ref'] or '—'}（依据：{basis}）",
+             "    依据为本机 refs/remotes，不 fetch；其他机器推送后本机未同步的提交可能仍显示为仅本机。",
+             f"    未推送提交 {len(info['unpushed'])} 个 · 未提交文件 {info['dirty_files']} 个"]
+    for sha, state in info["commits"].items():
+        lines.append(f"    {sha[:12]} → {state or 'unknown'}")
+    lines.extend(f"    读取问题：{e}" for e in info["errors"])
+    return lines
+
+
 def render_evidence(bundle: dict, notes: dict | None = None) -> str:
     notes = notes or {}
     window = bundle["window"]
@@ -338,6 +352,8 @@ def render_evidence(bundle: dict, notes: dict | None = None) -> str:
             lines.append("    来源工作树：" + "、".join(commit["tree_ids"]))
             if commit["kind"] == "merge":
                 lines.append("    合并父提交：" + "、".join(commit["parents"]))
+        if project.get("delivery_state"):
+            lines.extend(delivery_lines(project["delivery_state"]))
         for event in project["activity"]:
             lines.append(f"  [{event['evidence_id']}] {event['at']} · {event['kind']} · " + "、".join(event["paths"]))
             if event["covered_by_commits"]:
