@@ -26,9 +26,10 @@ class RuleFirstTests(unittest.TestCase):
         self.report = self.home / "reports/daily/2026-10-02.txt"
         self.events = []
 
-    def notifier(self, date, path):
+    def notifier(self, date, path, message):
         # What the user would see at notification time.
         self.events.append(("notify", Path(path).read_text()))
+        self.message = message
         return True
 
     def run_scheduled(self, client_factory):
@@ -77,6 +78,25 @@ class RuleFirstTests(unittest.TestCase):
         history = list((self.report.parent / "history" / "2026-10-02").glob("*.txt"))
         self.assertTrue(any("已补充解读" not in h.read_text() for h in history))
         self.assertEqual(len(self.notification_rows()), 1)
+
+    def test_notification_carries_summary_and_first_next_step(self):
+        self.run_scheduled(lambda _cfg: None)
+        lines = self.report.read_text().splitlines()
+        headline, body = self.message
+        self.assertEqual(headline, lines[1])
+        first_step = lines[lines.index("明天从这里继续") + 1].split(". ", 1)[1]
+        self.assertEqual(body, "明天先：" + first_step)
+        self.assertEqual(body, "明天先：xiuqiu-site：推送本地的 1 个提交")
+
+    def test_macos_notification_passes_text_as_data(self):
+        from xiaomao import daily_jobs
+        with patch.object(daily_jobs.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertTrue(daily_jobs.macos_notification("2026-10-02", "/x", ("今天 1 个项目有进展。", "明天先：推送")))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "/usr/bin/osascript")
+        self.assertEqual(argv[-2:], ["今天 1 个项目有进展。", "明天先：推送"])
+        self.assertNotIn("今天", argv[2])  # never interpolated into the script
 
     def test_rerun_never_notifies_again(self):
         self.run_scheduled(lambda _cfg: None)

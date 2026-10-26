@@ -173,13 +173,22 @@ def persist_window(conn, bundle) -> None:
     ))
 
 
-def macos_notification(date: str, path: str) -> bool:
+def notification_text(bundle) -> tuple[str, str]:
+    """Headline and body: the report's first line and the first next step."""
+    from xiaomao.feature_render import plain_next_steps, plain_summary_line
+    steps = plain_next_steps(bundle)
+    body = f"明天先：{steps[0]}" if steps else "点开菜单查看晚报。"
+    return plain_summary_line(bundle), body
+
+
+def macos_notification(date: str, path: str, message: tuple[str, str] | None = None) -> bool:
+    headline, body = message or (f"{date} 工作总结已生成", "可从菜单打开。")
     # Arguments are data, never interpolated AppleScript or shell.
-    script = ('on run argv\n display notification (item 1 of argv) '
-              'with title "小猫日报" subtitle (item 2 of argv)\nend run')
+    script = ('on run argv\n display notification (item 2 of argv) '
+              'with title "小猫晚报" subtitle (item 1 of argv)\nend run')
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-e", script, f"{date} 工作总结已生成，可从菜单打开。", path],
+            ["/usr/bin/osascript", "-e", script, headline[:120], body[:200]],
             capture_output=True, timeout=15, check=False,
         )
         return result.returncode == 0
@@ -199,7 +208,8 @@ def notify_once(conn, cfg, bundle, sender=macos_notification) -> None:
         return
     from xiaomao.reports import daily_path
     try:
-        ok = sender(bundle["window"]["date"], str(daily_path(cfg, bundle["window"]["date"])))
+        ok = sender(bundle["window"]["date"], str(daily_path(cfg, bundle["window"]["date"])),
+                    notification_text(bundle))
     except Exception:
         ok = False
     conn.execute("UPDATE daily_notifications SET state=? WHERE window_key=?",
