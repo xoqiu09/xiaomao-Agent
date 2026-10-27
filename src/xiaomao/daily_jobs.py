@@ -17,6 +17,10 @@ from xiaomao.store import open_db, utc_now
 from xiaomao.feature_daily import (PROMPT_VERSION, SYSTEM, model_packet, prepare_inference,
                                    inference_schema, expand_inference, validate_records)
 MAX_CATCHUP = 7
+# Longest observed full scan is ~3 minutes; the daily waits at most this long
+# for the collection lock, then publishes from the latest stored collection.
+LOCK_WAIT_S = 90
+LOCK_BUSY_NOTE = "生成时另一次扫描仍在进行，本次使用最近一次采集结果"
 
 
 def _hash(value) -> str:
@@ -169,13 +173,22 @@ def persist_window(conn, bundle) -> None:
     ))
 
 
-def macos_notification(date: str, path: str) -> bool:
+def notification_text(bundle) -> tuple[str, str]:
+    """Headline and body: the report's first line and the first next step."""
+    from xiaomao.feature_render import plain_next_steps, plain_summary_line
+    steps = plain_next_steps(bundle)
+    body = f"明天先：{steps[0]}" if steps else "点开菜单查看晚报。"
+    return plain_summary_line(bundle), body
+
+
+def macos_notification(date: str, path: str, message: tuple[str, str] | None = None) -> bool:
+    headline, body = message or (f"{date} 工作总结已生成", "可从菜单打开。")
     # Arguments are data, never interpolated AppleScript or shell.
-    script = ('on run argv\n display notification (item 1 of argv) '
-              'with title "小猫日报" subtitle (item 2 of argv)\nend run')
+    script = ('on run argv\n display notification (item 2 of argv) '
+              'with title "小猫晚报" subtitle (item 1 of argv)\nend run')
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-e", script, f"{date} 工作总结已生成，可从菜单打开。", path],
+            ["/usr/bin/osascript", "-e", script, headline[:120], body[:200]],
             capture_output=True, timeout=15, check=False,
         )
         return result.returncode == 0
@@ -195,7 +208,8 @@ def notify_once(conn, cfg, bundle, sender=macos_notification) -> None:
         return
     from xiaomao.reports import daily_path
     try:
-        ok = sender(bundle["window"]["date"], str(daily_path(cfg, bundle["window"]["date"])))
+        ok = sender(bundle["window"]["date"], str(daily_path(cfg, bundle["window"]["date"])),
+                    notification_text(bundle))
     except Exception:
         ok = False
     conn.execute("UPDATE daily_notifications SET state=? WHERE window_key=?",
@@ -225,13 +239,11 @@ def preserve_report(path: Path, text: str) -> None:
 
 
 def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
-              client_factory=None, notifier=macos_notification) -> list[Path]:
+              client_factory=None, notifier=macos_notification,
+              lock_wait_s=LOCK_WAIT_S) -> list[Path]:
     from xiaomao.collect import scan_authorized
-    from xiaomao.config import load_config
     from xiaomao.inventory import effective_config
     from xiaomao.lock import ScanLock
-    from xiaomao.menu_briefing import _atomic_write, write_daily_briefing
-    from xiaomao.reports import daily_path
     from xiaomao.store import infer_paused
     now = now or datetime.now(timezone.utc)
     paths = ensure_layout(Path(cfg.home))
@@ -242,46 +254,75 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
                 date or now.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()]
         if not dates:
             return []
-        with ScanLock(paths["lock"], retries=5, retry_s=1), open_db(paths["db"]) as conn:
-            effective = effective_config(cfg)
-            scan_authorized(conn, effective)  # final collection; contains no model calls
+        effective = effective_config(cfg)
+        try:
+            with ScanLock(paths["lock"], retries=lock_wait_s, retry_s=1), open_db(paths["db"]) as conn:
+                scan_authorized(conn, effective)  # final collection; contains no model calls
+        except RuntimeError as exc:
+            if "another xiaomao scan holds" not in str(exc):
+                raise
+            # Bounded wait: publish from the latest stored collection instead
+            # of failing; late commits later repair the window (due_dates).
+            # Surfaced as a collection gap: coverage becomes partial.
+            effective._inventory_errors = [*getattr(effective, "_inventory_errors", []), LOCK_BUSY_NOTE]
+        with open_db(paths["db"]) as conn:
             if scheduled and not date:
                 dates = due_dates(effective, conn, now)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]
             paused = infer_paused(conn)
-        # Both SQLite and the collection lock are released before local inference.
+        # Read-only Git ref queries, outside any database transaction.
+        from xiaomao.delivery_state import annotate_bundle
+        for bundle in bundles:
+            annotate_bundle(bundle)
+        # Pass 1: the rule version is published and notified before any model
+        # work, so a slow or missing model never delays the evening report.
+        wants_model = (scheduled or with_model) and not paused
+        for bundle in bundles:
+            rule_notes = ({p["repo_id"]: {"error": "推理已暂停"} for p in bundle["projects"] if p["changed"]}
+                          if paused else {})
+            written.append(publish(cfg, bundle, rule_notes))
+            if scheduled:
+                with open_db(paths["db"]) as conn:
+                    notify_once(conn, cfg, bundle, notifier)
+        # Pass 2: model interpretation, outside SQLite and the collection lock.
+        # The same report is updated in place; no second notification.
         client = None
-        if (scheduled or with_model) and not paused and any(
-                p["changed"] for b in bundles for p in b["projects"]):
+        if wants_model and any(p["changed"] for b in bundles for p in b["projects"]):
             if client_factory is None:
                 from xiaomao.cli import _briefing_client
                 client_factory = _briefing_client
             client = client_factory(cfg)
-        for bundle in bundles:
-            notes = summarize_projects(cfg, bundle, client) if scheduled or with_model else {}
-            if paused:
-                notes = {p["repo_id"]: {"error": "推理已暂停"} for p in bundle["projects"] if p["changed"]}
-            # A concurrent settings edit invalidates the pending publication.
-            if scope_set(load_config(Path(cfg.home))) != bundle["scope"]:
-                raise RuntimeError("观察范围已改变，请重新生成日报")
-            from xiaomao.feature_daily import feature_records
-            from xiaomao.feature_render import write_details
-            bundle["functional_records"] = {p["repo_id"]: feature_records(p, notes.get(p["repo_id"]))
-                                             for p in bundle["projects"]}
-            bundle["interpretation_hash"] = _hash(bundle["functional_records"])
-            dest = daily_path(cfg, bundle["window"]["date"])
-            if dest.parent.resolve() != Path(cfg.home).resolve() / "reports" / "daily":
-                raise ValueError("日报目录越出数据 home")
-            text = render_bundle(bundle, notes)
-            write_details(cfg, bundle, notes)
-            preserve_report(dest, text)
-            _atomic_write(dest, text)
-            bind_report(dest, text, cfg, "daily", daily_bundle=bundle)
-            write_daily_briefing(cfg, bundle, notes)
-            with open_db(paths["db"]) as conn:
-                persist_window(conn, bundle)
-            if scheduled:
-                with open_db(paths["db"]) as conn:
-                    notify_once(conn, cfg, bundle, notifier)
-            written.append(dest)
+        if wants_model:
+            for bundle in bundles:
+                notes = summarize_projects(cfg, bundle, client)
+                if notes:
+                    publish(cfg, bundle, notes,
+                            supplemented=any(n.get("accepted") for n in notes.values()))
     return written
+
+
+def publish(cfg, bundle, notes, *, supplemented=False) -> Path:
+    """Write the plain report, evidence and menu for one window and persist it."""
+    from xiaomao.config import load_config
+    from xiaomao.feature_daily import feature_records
+    from xiaomao.feature_render import render_plain_summary, write_details
+    from xiaomao.menu_briefing import _atomic_write, write_daily_briefing
+    from xiaomao.reports import daily_path
+    # A concurrent settings edit invalidates the pending publication.
+    if scope_set(load_config(Path(cfg.home))) != bundle["scope"]:
+        raise RuntimeError("观察范围已改变，请重新生成日报")
+    bundle["functional_records"] = {p["repo_id"]: feature_records(p, notes.get(p["repo_id"]))
+                                    for p in bundle["projects"]}
+    bundle["interpretation_hash"] = _hash(bundle["functional_records"])
+    dest = daily_path(cfg, bundle["window"]["date"])
+    if dest.parent.resolve() != Path(cfg.home).resolve() / "reports" / "daily":
+        raise ValueError("日报目录越出数据 home")
+    text = render_plain_summary(bundle, notes, supplemented=supplemented)
+    write_details(cfg, bundle, notes)
+    preserve_report(dest, text)
+    _atomic_write(dest, text)
+    bind_report(dest, text, cfg, "daily", daily_bundle=bundle)
+    write_daily_briefing(cfg, bundle, notes)
+    with open_db(layout(Path(cfg.home))["db"]) as conn:
+        persist_window(conn, bundle)
+    return dest

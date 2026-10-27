@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date as Date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -157,7 +157,10 @@ def render_summary(bundle, notes):
 
 def render_details(bundle, notes):
     from xiaomao.daily import render_evidence
-    lines = [render_evidence(bundle), "完整功能条目及原文支持", "===================="]
+    # The plain evening report is the user-facing body; the former full
+    # functional summary stays here so the evidence is not reduced.
+    lines = [render_evidence(bundle), "功能日报（完整版）", "====================",
+             render_summary(bundle, notes), "完整功能条目及原文支持", "===================="]
     for project in bundle["projects"]:
         lines.append("项目：" + project["display_name"])
         lines.append(json.dumps(author_free({"records": feature_records(project, notes.get(project["repo_id"])),
@@ -194,3 +197,198 @@ def write_details(cfg, bundle, notes):
     _atomic_write(dest, text)
     bind_report(dest, text, cfg, "daily-evidence", daily_bundle=bundle)
     return dest
+
+
+# ---- Plain evening report (core plan §3) ----------------------------------
+
+WEEKDAYS = "一二三四五六日"
+PLAIN_MAX_PROJECTS = 3
+PLAIN_MAX_ITEMS = 3
+PLAIN_MAX_LINES = 40
+# Core plan §3 rule 7: technical wording that stays in the evidence file.
+BANNED_TERMS = ("未核实", "范围哈希", "观察 ID", "观察ID", "覆盖 partial", "功能归属待确认", "交付状态待确认")
+UNCLEAR = "这条看不出具体做了什么"
+PROGRESS_PLAIN = {"design_only": "更新了说明或设计文档", "maintenance": "做了内部维护",
+                  "restored": "改过又改回去了，不算新功能"}
+
+
+def _state_label(state, has_remote):
+    from xiaomao.delivery_state import LABELS
+    if state is None or (has_remote is False and state not in {"uncommitted", "local"}):
+        return ""
+    return LABELS[state]
+
+
+def _plain_text(record):
+    """Validated model wording when present; otherwise rule wording a reader can use."""
+    named = record["feature_name"] not in UNKNOWN_NAMES
+    if record["interpretation"] == "model_static":
+        text = record["after"].rstrip("。")
+        if record["impact"]:
+            text += "，" + record["impact"].rstrip("。")
+    elif record["progress"] in PROGRESS_PLAIN:
+        text = PROGRESS_PLAIN[record["progress"]]
+        text = f"{record['feature_name']}：{text}" if named else text
+    else:
+        text = f"{record['feature_name']}有改动，{UNCLEAR}" if named else UNCLEAR
+    if any(term in text for term in BANNED_TERMS):
+        text = UNCLEAR
+    return text
+
+
+def _commit_text(commit):
+    """Rule wording for a commit: the author's own subject line, already redacted."""
+    subject = (commit.get("subject") or "").strip()
+    if not subject or any(term in subject for term in BANNED_TERMS):
+        return UNCLEAR
+    return subject if len(subject) <= 60 else subject[:59] + "…"
+
+
+def _plain_items(project, notes):
+    """Validated model records first; every other change gets a rule line.
+
+    Rule lines are one per commit (its own state) plus one for uncommitted
+    work, so a label never mixes commits that sit in different places.
+    """
+    from xiaomao.delivery_state import record_state
+    units = {u["unit_id"]: u for u in project_units(project)}
+    info = project.get("delivery_state") or {}
+    has_remote = info.get("has_remote")
+    items, covered, pending_covered = [], set(), False
+    note = notes.get(project["repo_id"])
+    if note and note.get("records") is not None:
+        for record in ordered_records(project, note):
+            if not record["today"] or record["interpretation"] != "model_static":
+                continue
+            own = [units[u] for u in record.get("unit_ids", []) if u in units]
+            covered.update(u["sha"] for u in own if u["origin"] == "commit")
+            pending_covered |= any(u["origin"] != "commit" for u in own)
+            state = record_state(record, units, project)
+            items.append({"text": _plain_text(record), "state": state, "feature": record["feature_name"],
+                          "label": _state_label(state, has_remote), "model": True})
+    for commit in reversed(project["commits"]):
+        if commit["sha"] in covered:
+            continue
+        state = info.get("commits", {}).get(commit["sha"])
+        items.append({"text": _commit_text(commit), "state": state,
+                      "label": _state_label(state, has_remote), "model": False})
+    dirty = 0 if pending_covered else info.get("dirty_files", 0)
+    if dirty and not items:
+        items.append({"text": f"{dirty} 处改动还没提交", "state": "uncommitted",
+                      "label": _state_label("uncommitted", has_remote), "model": False})
+        dirty = 0
+    elif not items and project["activity"]:
+        items.append({"text": "有过改动，但没有留下新的提交或未提交内容", "state": None,
+                      "label": "", "model": False})
+    return items, dirty
+
+
+def _project_title(project, items=()):
+    suffix = "（无远端）" if (project.get("delivery_state") or {}).get("has_remote") is False else ""
+    features = {i["feature"] for i in items if i.get("feature")} - UNKNOWN_NAMES
+    feature = f" · {features.pop()}" if len(features) == 1 else ""
+    return project["display_name"] + suffix + feature
+
+
+def _item_line(prefix, item):
+    return f"{prefix}{item['text']}" + (f"  {item['label']}" if item["label"] else "")
+
+
+def plain_next_steps(bundle):
+    """Rule-generated next steps, most actionable first; the model never picks these."""
+    steps = []
+    for project in bundle["projects"]:
+        info = project.get("delivery_state") or {}
+        name = project["display_name"]
+        if info.get("unpushed") and info.get("has_remote"):
+            steps.append((0, f"{name}：推送本地的 {len(info['unpushed'])} 个提交", len(info["unpushed"])))
+        if info.get("dirty_files"):
+            advice = "，建议分批提交" if info["dirty_files"] >= 20 else "，记得提交"
+            steps.append((1, f"{name}：{info['dirty_files']} 处未提交改动{advice}", info["dirty_files"]))
+        pushed = sum(s == "pushed" for s in info.get("commits", {}).values())
+        if info.get("default_ref") and pushed:
+            branch = info["default_ref"].rsplit("/", 1)[-1]
+            steps.append((2, f"{name}：已推送的分支还没合进 {branch}", pushed))
+    # Within a kind, the larger backlog first (72 dirty files before 1).
+    steps.sort(key=lambda s: (s[0], -s[2]))
+    # One step of each kind first (push, commit, merge), then the rest.
+    firsts = [next(s for s in steps if s[0] == kind) for kind in (0, 1, 2) if any(s[0] == kind for s in steps)]
+    return [s[1] for s in firsts + [s for s in steps if s not in firsts]]
+
+
+# Only real failures are counted in the plain report (user decision
+# 2026-10-26): scan errors, read failures, missing model interpretation.
+# Baselines, collection intervals, truncation, redaction and unregistered
+# candidates stay listed in the evidence file but are not counted.
+FAILED_GAP_MARKERS = ("采集 error", "采集 inconsistent", "repository_identity_unavailable", "日报证据采集失败")
+FAILED_LIMITATION_MARKERS = ("commit_history_unavailable", ": unreadable")
+FAILED_INVENTORY_MARKERS = ("unavailable", "git_metadata_timeout", "invalid_git_metadata", "invalid_project_path",
+                            "另一次扫描仍在进行")
+# A paused model or a day with nothing to interpret is not a failure.
+MODEL_MISSING = {"本地模型不可用或未启用", "模型调用失败", "输出未通过证据校验", "达到存储预算，保留规则证据"}
+
+
+def _issue_count(bundle, notes):
+    count = sum(any(m in e for m in FAILED_INVENTORY_MARKERS) for e in bundle["inventory_errors"])
+    for project in bundle["projects"]:
+        count += sum(any(m in g for m in FAILED_GAP_MARKERS) for g in project["gaps"])
+        count += sum(any(m in item for m in FAILED_LIMITATION_MARKERS) for item in project["limitations"])
+        # A project whose worktrees are all gone is not a read failure.
+        count += sum(e != "no_live_tree" for e in (project.get("delivery_state") or {}).get("errors", []))
+        count += notes.get(project["repo_id"], {}).get("error") in MODEL_MISSING
+    return count
+
+
+def plain_summary_line(bundle):
+    """First line of the plain report; also the notification headline."""
+    active = sum(p["changed"] for p in bundle["projects"])
+    unpushed = [(p["display_name"], len((p.get("delivery_state") or {}).get("unpushed", [])))
+                for p in bundle["projects"]]
+    unpushed = [(name, n) for name, n in unpushed if n]
+    line = f"今天 {active} 个项目有进展" if active else "今天没有新的进展"
+    if len(unpushed) == 1:
+        line += f"，{unpushed[0][0]} 有 {unpushed[0][1]} 个提交还没推送"
+    elif unpushed:
+        line += f"，{len(unpushed)} 个项目共 {sum(n for _, n in unpushed)} 个提交还没推送"
+    return line + "。"
+
+
+def render_plain_summary(bundle, notes, *, supplemented=False):
+    """Plain evening report: ≤40 lines, ≤3 projects × ≤3 items, each with a state label."""
+    notes = notes or {}
+    day = Date.fromisoformat(bundle["window"]["date"])
+    title = f"小猫晚报 · {day.month}月{day.day}日（周{WEEKDAYS[day.weekday()]}）"
+    title += " · 截止前预览" if bundle.get("preview") else ""
+    title += " · 已补充解读" if supplemented else ""
+    lines = [title, plain_summary_line(bundle), ""]
+    active = [(p, *_plain_items(p, notes)) for p in bundle["projects"] if p["changed"]]
+    active = [row for row in active if row[1]]
+    # Projects with readable, interpreted progress first; then the busiest.
+    active.sort(key=lambda row: (-sum(i["model"] for i in row[1]),
+                                 -sum(UNCLEAR not in i["text"] for i in row[1]), -len(row[1])))
+    for project, items, dirty in active[:PLAIN_MAX_PROJECTS]:
+        lines.append(f"★ {_project_title(project, items)}")
+        lines.extend(_item_line("  · ", item) for item in items[:PLAIN_MAX_ITEMS])
+        if len(items) > PLAIN_MAX_ITEMS:
+            lines.append(f"  （另有 {len(items) - PLAIN_MAX_ITEMS} 项变化，见依据）")
+        if dirty:
+            lines.append(f"  （另有 {dirty} 处改动还没提交）")
+        lines.append("")
+    for project, items, _dirty in active[PLAIN_MAX_PROJECTS:]:
+        lines.append(_item_line(f"· {_project_title(project)}：", items[0]))
+    if active[PLAIN_MAX_PROJECTS:]:
+        lines.append("")
+    steps = plain_next_steps(bundle)
+    if steps:
+        lines.append("明天从这里继续")
+        lines.extend(f"  {n}. {text}" for n, text in enumerate(steps[:3], 1))
+        lines.append("")
+    quiet = [p["display_name"] for p in bundle["projects"] if not p["changed"]]
+    if quiet:
+        lines.append("今天没动：" + "、".join(quiet))
+    if issues := _issue_count(bundle, notes):
+        lines.append(f"{issues} 处采集问题，详见依据 → 菜单「查看依据」")
+    lines.append("MacBook 上还没推送的工作，小猫看不到。")
+    if len(lines) > PLAIN_MAX_LINES:
+        lines = lines[:PLAIN_MAX_LINES - 1] + ["（内容较多，其余见依据）"]
+    return "\n".join(lines) + "\n"

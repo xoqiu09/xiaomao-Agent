@@ -16,8 +16,11 @@ from xiaomao.store import open_db
 EXPECTED = {
     "projects": 3, "trees": 5, "commits": 1, "ongoing_trees": 2,
     "model_projects": ["website", "notes"],
+    # Plain evening report body (core plan §3); the full functional summary
+    # with before/after/impact moved into the evidence file.
     "must_include": ["每日工作总结", "汇总当天的提交和未提交工作", "草稿保存", "将草稿写入文本文件",
-                     "已提交", "尚未提交", "本窗口没有新的推进证据"],
+                     "🟡 未提交", "今天没动：学习笔记"],
+    "detail_must_include": ["已提交", "尚未提交", "本窗口没有新的推进证据", "功能日报（完整版）"],
     "must_exclude": ["report.py", "draft.py", "README.md", "AFTER_CUTOFF"],
 }
 
@@ -105,6 +108,8 @@ def generate(root):
         assert text not in body, text
     assert "AFTER_CUTOFF" not in json.dumps(bundle)
     assert all("功能逻辑" not in r["feature_name"] for rows in bundle["functional_records"].values() for r in rows)
+    for text in EXPECTED["detail_must_include"]:
+        assert text in detail, text
     assert "report.py" in detail and "draft.py" in detail
     assert "汇总当天的提交和未提交工作" in menu and "将草稿写入文本文件" in menu
     return {"body": body, "detail": detail, "menu": menu, "bundle": bundle,

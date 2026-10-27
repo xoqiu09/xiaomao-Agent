@@ -147,7 +147,11 @@ class DailyJobTests(unittest.TestCase):
                               scheduled=True, client_factory=lambda _: BadClient(),
                               notifier=lambda *args: calls.append(args))
         self.assertFalse(calls)
-        self.assertIn("模型解读缺失", paths[0].read_text())
+        # A failed model call is a real failure: counted in the one issue line,
+        # with the detail in the evidence.
+        self.assertIn("采集问题，详见依据", paths[0].read_text())
+        evidence = Path(self.cfg.home) / "reports/daily-evidence/2026-10-02.txt"
+        self.assertIn("模型解读缺失", evidence.read_text())
 
     def test_late_commit_repairs_report_without_second_notification(self):
         from xiaomao.daily_jobs import persist_window, due_dates, notify_once
