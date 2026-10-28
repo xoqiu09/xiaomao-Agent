@@ -64,6 +64,19 @@ class PlainReportTests(unittest.TestCase):
         self.assertTrue(2 <= len(steps) <= 3)
         self.assertIn("推送本地的 1 个提交", steps[0])
 
+    def test_menu_uses_the_same_plain_wording(self):
+        from xiaomao.menu_briefing import parse_menu_briefing
+        menu = (Path(self.cfg.home) / "reports/briefing/menu-2026-10-02.txt").read_text()
+        today, idle, _model_used = parse_menu_briefing(menu)
+        self.assertEqual(today[0], self.body.splitlines()[1])
+        self.assertEqual(today[1], "xiuqiu-site：空结果提示  🟠 仅本机（另有 2 项）")
+        self.assertIn("笔记工具（无远端）：待办列表  🟠 仅本机", today)
+        self.assertEqual(today[-1], "明天先：xiuqiu-site：推送本地的 1 个提交")
+        self.assertLessEqual(len(today), 5)
+        for term in (*BANNED_TERMS, "待确认", "部分覆盖", "未观察到新增变化", "历史活跃度"):
+            self.assertNotIn(term, menu)
+        self.assertNotIn("旷野之心", "".join(today))
+
     def test_evidence_keeps_full_detail(self):
         self.assertIn("功能日报（完整版）", self.evidence)
         self.assertIn("代码位置（生成时）", self.evidence)
