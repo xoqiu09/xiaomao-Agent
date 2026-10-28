@@ -40,16 +40,6 @@ def unknown_sentence(records):
     return text + "交付：" + "；".join(DELIVERY[d] for d in sorted(deliveries)) + "。"
 
 
-def today_sentences(project, note=None, *, limit=5):
-    rows = [r for r in ordered_records(project, note) if r["today"]]
-    named = [r for r in rows if r["feature_name"] not in UNKNOWN_NAMES]
-    unknown = [r for r in rows if r["feature_name"] in UNKNOWN_NAMES]
-    sentences = [record_sentence(r) for r in named[:limit]]
-    if unknown and len(sentences) < limit:
-        sentences.append(unknown_sentence(unknown))
-    return sentences
-
-
 def author_free(value):
     """Hide attribution fields from personal-project report presentation."""
     if isinstance(value, dict):
@@ -353,6 +343,30 @@ def plain_summary_line(bundle):
     return line + "。"
 
 
+def _ranked_active(bundle, notes):
+    active = [(p, *_plain_items(p, notes)) for p in bundle["projects"] if p["changed"]]
+    active = [row for row in active if row[1]]
+    # Projects with readable, interpreted progress first; then the busiest.
+    active.sort(key=lambda row: (-sum(i["model"] for i in row[1]),
+                                 -sum(UNCLEAR not in i["text"] for i in row[1]), -len(row[1])))
+    return active
+
+
+def plain_menu_lines(bundle, notes):
+    """Menu 'today' lines: the report headline, one line per project, the first next step."""
+    notes = notes or {}
+    lines = [plain_summary_line(bundle)]
+    active = _ranked_active(bundle, notes)
+    for project, items, _dirty in active[:PLAIN_MAX_PROJECTS]:
+        more = f"（另有 {len(items) - 1} 项）" if len(items) > 1 else ""
+        lines.append(_item_line(f"{_project_title(project, items)}：", items[0]) + more)
+    if rest := active[PLAIN_MAX_PROJECTS:]:
+        lines.append(f"另有 {len(rest)} 个项目有进展，见晚报")
+    if steps := plain_next_steps(bundle):
+        lines.append("明天先：" + steps[0])
+    return lines
+
+
 def render_plain_summary(bundle, notes, *, supplemented=False):
     """Plain evening report: ≤40 lines, ≤3 projects × ≤3 items, each with a state label."""
     notes = notes or {}
@@ -361,11 +375,7 @@ def render_plain_summary(bundle, notes, *, supplemented=False):
     title += " · 截止前预览" if bundle.get("preview") else ""
     title += " · 已补充解读" if supplemented else ""
     lines = [title, plain_summary_line(bundle), ""]
-    active = [(p, *_plain_items(p, notes)) for p in bundle["projects"] if p["changed"]]
-    active = [row for row in active if row[1]]
-    # Projects with readable, interpreted progress first; then the busiest.
-    active.sort(key=lambda row: (-sum(i["model"] for i in row[1]),
-                                 -sum(UNCLEAR not in i["text"] for i in row[1]), -len(row[1])))
+    active = _ranked_active(bundle, notes)
     for project, items, dirty in active[:PLAIN_MAX_PROJECTS]:
         lines.append(f"★ {_project_title(project, items)}")
         lines.extend(_item_line("  · ", item) for item in items[:PLAIN_MAX_ITEMS])

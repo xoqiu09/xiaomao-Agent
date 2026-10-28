@@ -385,24 +385,25 @@ def _atomic_write(path: Path, text: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def daily_idle_lines(cfg, bundle) -> list[str]:
+    """Long-idle projects from stored facts; read-only, never a rescan."""
+    from xiaomao.store import open_db_readonly
+    changed = {p["project_id"] for p in bundle["projects"] if p["changed"]}
+    projects = [p for p in cfg.projects if not project_exclusion_reason(p) and p.project_id not in changed]
+    try:
+        with open_db_readonly(layout(Path(cfg.home))["db"]) as conn:
+            by_project = facts_by_project(cfg, conn)
+    except Exception:
+        return ["暂时读不到各项目的上次提交时间"]
+    return sections_from_projects(projects, by_project)[1]
+
+
 def write_daily_briefing(cfg, bundle, notes) -> Path:
-    """Use the exact daily packet and validated notes; do not rescan or infer."""
-    from xiaomao.feature_render import today_sentences
+    """Same plain wording as the evening report, from the exact daily packet."""
+    from xiaomao.feature_render import plain_menu_lines
     from xiaomao.report_access import bind_report
-    today = []
-    for project in bundle["projects"]:
-        note = notes.get(project["repo_id"], {})
-        bullets = today_sentences(project, note, limit=3)
-        if not project["changed"]:
-            if project["ongoing"]:
-                today.append(f"{project['display_name']}：有遗留未提交工作，未观察到新增变化。")
-            continue
-        sentence = "；".join(b["text"] if isinstance(b, dict) else b for b in bullets[:3])
-        today.append(f"{project['display_name']}：{sentence}")
-    today.insert(0, f"日报窗口 {bundle['window']['date']} · {bundle['window']['timezone']} · "
-                    f"{'部分覆盖，详见采集缺口' if bundle['coverage'] == 'partial' else '完整覆盖'}")
-    text = render_menu_briefing(today, ["本日报只汇总所示窗口；历史活跃度未重新判断。"],
-                               model_used=any(n.get("accepted") for n in notes.values()))
+    text = render_menu_briefing(plain_menu_lines(bundle, notes), daily_idle_lines(cfg, bundle),
+                                model_used=any(n.get("accepted") for n in notes.values()))
     dest = menu_path(cfg, bundle["window"]["date"])
     dest.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(dest, text)

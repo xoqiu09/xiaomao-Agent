@@ -435,7 +435,7 @@ def _briefing_sections(
             from xiaomao.report_access import read_bound_report
             text = read_bound_report(path, home, cfg, "briefing")
         except (OSError, ValueError, KeyError, TypeError):
-            return ["日报摘要范围未核实，请重新生成。"], [], False
+            return ["菜单摘要和当前项目对不上，请重新生成日报。"], [], False
         if text:
             today, idle, model_used = parse_menu_briefing(text)
             if today or idle:
