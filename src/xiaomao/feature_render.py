@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date as Date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -198,6 +199,7 @@ PLAIN_MAX_LINES = 40
 # Core plan §3 rule 7: technical wording that stays in the evidence file.
 BANNED_TERMS = ("未核实", "范围哈希", "观察 ID", "观察ID", "覆盖 partial", "功能归属待确认", "交付状态待确认")
 UNCLEAR = "这条看不出具体做了什么"
+_PR_SUFFIX = re.compile(r" \(#\d+\)$")
 PROGRESS_PLAIN = {"design_only": "更新了说明或设计文档", "maintenance": "做了内部维护",
                   "restored": "改过又改回去了，不算新功能"}
 
@@ -256,8 +258,14 @@ def _plain_items(project, notes):
             state = record_state(record, units, project)
             items.append({"text": _plain_text(record), "state": state, "feature": record["feature_name"],
                           "label": _state_label(state, has_remote), "model": True})
+    # A rebased or squashed copy shows once, under the commit that is on the default branch.
+    copies = set(info.get("merged_by_content", []))
+    landed = {_PR_SUFFIX.sub("", (c.get("subject") or "").strip()) for c in project["commits"]
+              if c["sha"] not in copies}
     for commit in reversed(project["commits"]):
         if commit["sha"] in covered:
+            continue
+        if commit["sha"] in copies and (commit.get("subject") or "").strip() in landed:
             continue
         state = info.get("commits", {}).get(commit["sha"])
         items.append({"text": _commit_text(commit), "state": state,
