@@ -124,6 +124,24 @@ class PlainReportTests(unittest.TestCase):
         self.assertIn("72 处未提交改动，建议分批提交", text)
         self.assertTrue(all(len(l) <= 90 for l in lines), max(lines, key=len))
 
+    def test_squash_merged_copy_shows_once_and_no_false_merge_step(self):
+        branch, landed = "a" * 40, "b" * 40
+        project = {"project_id": "s", "display_name": "站点", "repo_id": "rs", "changed": True,
+                   "trees": [], "activity": [], "ongoing": [], "gaps": [], "limitations": [],
+                   "commits": [{"sha": branch, "subject": "content: radar 10-30", "files": [], "evidence_id": "commit:rs:" + branch},
+                               {"sha": landed, "subject": "content: radar 10-30 (#129)", "files": [], "evidence_id": "commit:rs:" + landed}],
+                   "delivery_state": {"has_remote": True, "default_ref": "refs/remotes/origin/main",
+                                      "default_basis": "remote_head", "errors": [], "unpushed": [],
+                                      "unpushed_stale": [], "merged_by_content": [branch],
+                                      "commits": {branch: "merged", landed: "merged"},
+                                      "dirty_files": 0, "dirty_trees": 0}}
+        bundle = {"window": {"date": "2026-10-30"}, "preview": False, "inventory_errors": [],
+                  "candidates": [], "projects": [project]}
+        text = render_plain_summary(bundle, {})
+        self.assertEqual(text.count("content: radar 10-30"), 1)
+        self.assertIn("content: radar 10-30 (#129)  🟢 已合并", text)
+        self.assertNotIn("还没合进", text)
+
     def test_validated_model_record_replaces_rule_line(self):
         from xiaomao.daily import build_bundle
         from xiaomao.delivery_state import annotate_bundle

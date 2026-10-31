@@ -300,8 +300,17 @@ def delivery_lines(info: dict) -> list[str]:
     lines = [f"  代码位置（生成时）：远端 {remote} · 默认分支 {info['default_ref'] or '—'}（依据：{basis}）",
              "    依据为本机 refs/remotes，不 fetch；其他机器推送后本机未同步的提交可能仍显示为仅本机。",
              f"    未推送提交 {len(info['unpushed'])} 个 · 未提交文件 {info['dirty_files']} 个"]
+    content = set(info.get("merged_by_content", []))
     for sha, state in info["commits"].items():
-        lines.append(f"    {sha[:12]} → {state or 'unknown'}")
+        basis = "（改动内容已在默认分支：rebase 或压缩合并）" if sha in content else ""
+        lines.append(f"    {sha[:12]} → {state or 'unknown'}{basis}")
+    if extra := sorted(content - set(info["commits"])):
+        lines.append(f"    本机分支上的提交改动内容已在默认分支，按已合并计 {len(extra)} 个："
+                     + "、".join(s[:12] for s in extra[:10]))
+    if stale := info.get("unpushed_stale"):
+        from xiaomao.delivery_state import STALE_LOCAL_DAYS
+        lines.append(f"    超过 {STALE_LOCAL_DAYS} 天的未推送提交 {len(stale)} 个（不进入正文提醒）："
+                     + "、".join(s[:12] for s in stale[:10]))
     lines.extend(f"    读取问题：{e}" for e in info["errors"])
     return lines
 
