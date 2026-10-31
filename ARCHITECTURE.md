@@ -29,7 +29,9 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
 | `report_access.py` | 旧日报 / 状态文件不能绕过当前授权范围 |
 | `swiftbar.py`, `scripts/read-handoff.py` | 菜单与固定只读查询入口；参数作为数据传递 |
 | `briefing.py` | 只读授权项目的 `00-项目说明.md`，切块消化为压缩 JSON；不是工作树扫描 |
-| `menu_briefing.py` | 菜单短句；扫描 / 查询路径不加载模型 |
+| `delivery_state.py` | 四档状态（未提交 / 仅本机 / 已推送 / 已合并）；只读本机 `refs/remotes`，不 fetch |
+| `feature_render.py` | 白话晚报 `render_plain_summary`、菜单行 `plain_menu_lines`、禁用词表；完整版 `render_summary` 进依据文件 |
+| `menu_briefing.py` | 菜单短句；日报菜单与晚报共用白话规则；扫描 / 查询路径不加载模型 |
 | `summarize.py`, `ollama_runtime.py`, `ops.py` | 可选本地解读、校验、去重、降级、卸载 |
 | `schedule.py`, `scripts/xiaomao-*.sh` | 用户级调度；脚本从自身位置找源码 |
 | `tests/`, `scripts/accept.py` | 临时 home 回归与明确隔离范围的验收 |
@@ -57,9 +59,12 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
                → collect / change_evidence（只读采集、内容指纹、脱敏差异）
                → activity（基线、样本、完整提交、逐树覆盖记录）
                → daily.build_bundle（固定窗口、仓库/SHA 去重、遗留 dirty）
-               → daily_jobs（释放采集锁和事务后逐项目解读）
-               → daily.render_bundle / menu_briefing.write_daily_briefing
+               → delivery_state.annotate_bundle（事务外只读 ref 查询，四档冻结进包）
+               → daily_jobs 第一步：发布规则版（render_plain_summary + write_daily_briefing）并通知
+               → daily_jobs 第二步：释放采集锁和事务后逐项目解读，通过校验则原地更新、不再通知
                → 原子报告对、daily_windows、每窗口通知记账
+
+最后一次采集最多等待采集锁 90 秒；等不到时用最近一次已存采集生成晚报，并记一条采集问题。
 
 日报和交接分别保留覆盖定义。动态树补充日报，不改变已登记交接的范围证明。日报范围哈希包含目录、所有者、工作树策略及时间设置；目录变化不会授权旧范围正文。身份元数据必须在内容读取前检查，动态路径若被替换则拒绝读取。
 
