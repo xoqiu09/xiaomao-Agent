@@ -71,8 +71,26 @@ class AskTests(unittest.TestCase):
     def test_project_filter(self):
         days = self.packet("笔记工具")
         self.assertEqual([p["project"] for p in days[0]["projects"]], ["笔记工具"])
-        self.assertTrue(days[0]["projects"][0]["no_remote"])
+        self.assertEqual([s["project"] for s in days[0]["status"]], ["笔记工具"])
+        self.assertTrue(days[0]["status"][0]["no_remote"])
         self.assertTrue(all(s.startswith("笔记工具") for s in days[0]["next_steps"]))
+
+    def test_status_covers_projects_without_changes_that_day(self):
+        """10/31: mini-exchange did not change but still held 5 unpushed commits."""
+        def project(name, changed, unpushed=(), commits=None):
+            return {"project_id": name, "display_name": name, "repo_id": name, "changed": changed,
+                    "commits": [], "ongoing": [], "activity": [], "trees": [],
+                    "delivery_state": {"has_remote": True, "default_ref": "refs/remotes/origin/main",
+                                       "unpushed": list(unpushed), "dirty_files": 0, "commits": commits or {}}}
+        bundle = {"window": {"date": "2026-10-31"}, "projects": [
+            project("mini-exchange", False, unpushed=["a" * 40] * 5),
+            project("Session Steward", True, commits={"b" * 40: "pushed"}),
+            project("QAI", False)]}
+        status = {s["project"]: s for s in build_packet([bundle])[0]["status"]}
+        self.assertEqual(status["mini-exchange"]["unpushed_commits"], 5)
+        self.assertEqual((status["Session Steward"]["unpushed_commits"],
+                          status["Session Steward"]["pushed_not_merged"]), (0, 1))
+        self.assertNotIn("QAI", status)                                   # nothing pending
         self.assertEqual(self.packet("不存在的项目"), [])
 
     def test_answer_names_its_days(self):
