@@ -209,6 +209,24 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(third["status"], "ok")
         self.assertGreater(len(client.calls), calls_after)
 
+    def test_legacy_digest_is_rebound_only_after_explicit_ingest(self):
+        from xiaomao.ask import project_briefs
+        from xiaomao.briefing import cache_paths
+        from xiaomao.policy import sha256_bytes
+        _root, home = self._home()
+        cfg = load_config(home)
+        self.assertEqual(ingest_project(cfg, "website", client=FakeClient())["status"], "ok")
+        body_path, meta_path = cache_paths(cfg, "website")
+        body, meta = json.loads(body_path.read_bytes()), json.loads(meta_path.read_bytes())
+        del body["scope_sha256"], meta["scope_sha256"], meta["source_path"]
+        body_path.write_text(json.dumps(body))
+        meta["body_sha256"] = sha256_bytes(body_path.read_bytes())
+        meta_path.write_text(json.dumps(meta))
+        self.assertEqual(project_briefs(cfg, "website"), [])
+        self.assertIsNotNone(load_cached_understanding(cfg, "website"))
+        self.assertEqual(ingest_project(cfg, "website")["status"], "unchanged")
+        self.assertEqual(project_briefs(cfg, "website")[0]["purpose"], body["understanding"]["purpose"])
+
     def test_scan_does_not_ingest(self) -> None:
         _root, home = self._home()
         buf = io.StringIO()
