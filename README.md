@@ -12,6 +12,7 @@
 - **通知带内容**：macOS 通知的副标题是晚报第一行，正文是「明天先：」加第一条建议。
 - **菜单栏**：SwiftBar 菜单「今天」一栏与晚报同一套白话：总结、每个项目一行、「明天先」；「很久没看」列出 14 天以上没提交的项目。每分钟只读刷新，不采集、不加载模型。
 - **依据文件**：完整的功能解读、代码位置、四档判定依据和采集问题放在 `reports/daily-evidence/<日期>.txt`，从菜单「查看日报依据」打开。白话正文只是另一种呈现，证据没有减少。
+- **随时提问**：`xiaomao ask "问题"` 用本地模型（默认 `qwen3.6:35b`，配置项 `ask_model`）回答最近几天（默认 7 天，最多 14 天）的项目问题。只用已存的晚报记录（提交标题、四档状态、未提交和未推送数量、明天从这里继续），不重新扫描、不读源代码；回答必须注明依据哪几天，没有依据的回答不采用。Ollama 没在运行时会从外盘临时启动，答完关掉。不写数据库、不发通知；推理暂停时不调用模型。
 
 ## 其他功能
 
@@ -88,6 +89,11 @@ xiaomao daily --with-model
 xiaomao latest daily --print
 xiaomao latest daily --details --print
 xiaomao projects coverage --date 2026-10-02
+
+# 随时提问（用本地模型，只用已存的晚报记录）
+xiaomao ask "这周 xiuqiu-site 做了什么"
+xiaomao ask "哪些还没推送" --days 3
+xiaomao ask "做到哪了" --project mini-exchange --model qwen3-coder:30b
 
 # 功能目录、调度与运行状态
 xiaomao features show --project PROJECT_ID
