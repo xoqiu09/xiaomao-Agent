@@ -520,6 +520,10 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
         lines.append("-- 没有很久没提交的项目。")
     if not model_used:
         lines.append("本次没有模型解读")
+    asker = Path(__file__).resolve().parents[2] / "scripts" / "ask-dialog.py"
+    payload = base64.urlsafe_b64encode(json.dumps([str(home.resolve())]).encode()).decode()
+    lines.append(f"问小猫… | bash={shlex.quote(sys.executable)} param1={shlex.quote(str(asker))} "
+                 f"param2={payload} terminal=false")
 
     lines.append("---")
     lines.append(f"扫描：{_escape(_outcome_zh(scan_outcome))} · {enabled_trees} 棵树")

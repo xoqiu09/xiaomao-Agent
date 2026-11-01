@@ -33,7 +33,7 @@ CLI 负责选择 home、锁、退出码和是否显式请求模型。Git 采集�
 | `feature_render.py` | 白话晚报 `render_plain_summary`、菜单行 `plain_menu_lines`、禁用词表；完整版 `render_summary` 进依据文件 |
 | `menu_briefing.py` | 菜单短句；日报菜单与晚报共用白话规则；扫描 / 查询路径不加载模型 |
 | `summarize.py`, `ollama_runtime.py`, `ops.py` | 可选本地解读、校验、去重、降级、卸载；`start_serve` 按需在外盘启动 loopback Ollama |
-| `ask.py` | `xiaomao ask`：只读已存 `daily_windows` 组成事实包，本地模型回答并校验引用日期；不写库、不扫描 |
+| `ask.py`, `scripts/ask-dialog.py` | `xiaomao ask` 与菜单「问小猫…」：只读晚报记录、项目说明摘要的用途句、文档库最新交接；回答分 project（校验引用）/ general（标明无依据）/ defer（转交 Codex/Claude）；对话框文字只作 argv 数据；不写库、不扫描 |
 | `schedule.py`, `scripts/xiaomao-*.sh` | 用户级调度；脚本从自身位置找源码 |
 | `tests/`, `scripts/accept.py` | 临时 home 回归与明确隔离范围的验收 |
 

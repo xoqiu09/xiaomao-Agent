@@ -83,6 +83,8 @@ class AppConfig:
     )
     # `xiaomao ask`: a general model answers plain questions better than a coder model.
     ask_model: str = "qwen3.6:35b"
+    # Document library home whose latest handoffs `xiaomao ask` may read; empty: none.
+    docs_home: str = ""
     # Only the per-project 00-项目说明.md under this root is read for briefing.
     # The folder itself is never registered as a worktree (it contains company docs).
     briefing_docs_root: str = "/Users/xiuqiu/Desktop/总doc"
@@ -195,6 +197,7 @@ def _as_dict(cfg: AppConfig) -> dict[str, Any]:
         "lite_model": cfg.lite_model,
         "depth_candidates": cfg.depth_candidates,
         "ask_model": cfg.ask_model,
+        "docs_home": cfg.docs_home,
         "briefing_docs_root": cfg.briefing_docs_root,
         "external": {
             "mount": cfg.external.mount,
@@ -286,6 +289,7 @@ def _from_dict(data: dict[str, Any], *, home: Path) -> AppConfig:
         lite_model=data.get("lite_model") or "gemma4:12b",
         depth_candidates=list(data.get("depth_candidates") or ["qwen3-coder:30b", "qwen3.6:35b"]),
         ask_model=data.get("ask_model") or "qwen3.6:35b",
+        docs_home=data.get("docs_home") or "",
         briefing_docs_root=data.get("briefing_docs_root") or "/Users/xiuqiu/Desktop/总doc",
     )
 
