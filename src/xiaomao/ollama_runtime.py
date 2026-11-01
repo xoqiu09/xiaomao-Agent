@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -323,6 +324,28 @@ def serve_env(cfg: AppConfig) -> dict[str, str]:
     env["OLLAMA_NUM_PARALLEL"] = "1"
     env["OLLAMA_KEEP_ALIVE"] = DEFAULT_KEEP_ALIVE
     return env
+
+
+def start_serve(cfg: AppConfig, *, wait_s: float = 30.0) -> subprocess.Popen | None:
+    """Start a loopback `ollama serve` on the checked volume; the caller stops it."""
+    bin_ = ollama_bin()
+    if not bin_ or not bind_is_loopback(cfg):
+        return None
+    env = serve_env(cfg)  # refuses an unchecked volume before anything starts
+    log = Path(cfg.home) / "logs" / "ollama-ask.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as out:
+        proc = subprocess.Popen([bin_, "serve"], env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=out, start_new_session=True)
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if api_get(cfg, "/api/tags") is not None:
+            return proc
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.5)
+    proc.terminate()
+    return None
 
 
 def bind_is_loopback(cfg: AppConfig) -> bool:

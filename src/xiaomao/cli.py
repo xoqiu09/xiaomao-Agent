@@ -287,6 +287,11 @@ def cmd_daily(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ask(ns: argparse.Namespace) -> int:
+    from xiaomao.ask import ask_command
+    return ask_command(ns, _home_from_args(ns))
+
+
 def _briefing_client(cfg):
     try:
         from xiaomao.ollama_runtime import OllamaClient, inspect_running, models_dir_allowed
@@ -685,6 +690,13 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--with-model", action="store_true")
     daily.add_argument("--scheduled", action="store_true", help="补齐已截止的日报窗口；每窗口仅提醒一次")
     daily.set_defaults(func=cmd_daily)
+
+    ask = sub.add_parser("ask", help="用本地模型回答关于最近几天项目的问题（只用已存的晚报记录）")
+    ask.add_argument("question", help="例如：这周 xiuqiu-site 做了什么")
+    ask.add_argument("--days", type=int, help="看最近几天，默认 7，最多 14")
+    ask.add_argument("--project", help="只看这个项目（项目 ID 或名称）")
+    ask.add_argument("--model", help="配置里登记的本地模型；默认 ask_model（qwen3.6:35b）")
+    ask.set_defaults(func=cmd_ask)
 
     projects = sub.add_parser("projects", help="个人仓库候选、覆盖及日报配置")
     projects.add_argument("action", choices=["discover", "coverage", "configure"])
