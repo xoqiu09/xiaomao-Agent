@@ -142,11 +142,85 @@ class AskTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("只能使用配置里登记的本地模型", err)
         self.assertEqual(client.calls, [])
-        ns = Namespace(question="q", days=3, project=None, model=None)
+        ns = Namespace(question="q", days=3, project="xiuqiu-site", model=None)
         err = io.StringIO()
         self.assertEqual(ask_command(ns, self.home, client_factory=lambda cfg: None, today="2026-11-01",
                                      out=io.StringIO(), err=err), 2)
-        self.assertIn("最近 3 天还没有晚报记录", err.getvalue())
+        self.assertIn("最近 3 天还没有这个项目的晚报记录", err.getvalue())
+
+    def test_general_answer_is_labelled_and_unsure_one_is_handed_off(self):
+        code, out, _err, _ = self.ask("什么是 rebase", reply={
+            "kind": "general", "answer": "rebase 把一串提交搬到另一个起点上重新提交。", "sources": [],
+            "not_in_records": False, "handoff_question": ""})
+        self.assertEqual(code, 0)
+        self.assertIn("这是模型自己的回答，没有依据小猫的记录", out)
+        code, out, _err, _ = self.ask("这段代码有没有并发问题", reply={
+            "kind": "defer", "answer": "要看代码才能判断。", "sources": [], "not_in_records": False,
+            "handoff_question": "请检查 xiuqiu-site 的筛选组件是否有并发问题"})
+        self.assertEqual(code, 0)
+        self.assertIn("建议去问 Codex 或 Claude，可以直接粘贴：\n请检查 xiuqiu-site 的筛选组件是否有并发问题", out)
+        code, _out, err, _ = self.ask(reply={"kind": "defer", "answer": "不确定", "sources": [],
+                                             "not_in_records": False, "handoff_question": ""})
+        self.assertEqual(code, 3)                                         # a handoff needs the question
+
+    def test_project_briefs_and_handoffs_are_bounded_sources(self):
+        from xiaomao.documents import DocumentStore
+        from xiaomao.config import save_config
+        briefing = self.home / "reports" / "briefing"
+        briefing.mkdir(parents=True, exist_ok=True)
+        (briefing / "website.json").write_text(json.dumps(
+            {"understanding": {"purpose": "个人网站，展示简报与学习内容。", "identities": [{"note": "/Users/x/secret"}]}}))
+        (briefing / "wallet.json").write_text(json.dumps({"understanding": {"purpose": "见 src/wallet/core.ts 文件"}}))
+        library = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        doc = DocumentStore(library).save(title="阶段一交接", content="下一步：补测试。" * 400,
+                                          source="claude-code", request_id="req-1")
+        self.cfg.docs_home = str(library)
+        save_config(self.cfg)
+        try:
+            code, out, _err, client = self.ask("xiuqiu-site 是做什么的", reply={
+                "kind": "project", "answer": "它是个人网站。", "sources": ["brief:website", f"doc:{doc['document_id']}"],
+                "not_in_records": False, "handoff_question": ""})
+        finally:
+            self.cfg.docs_home = ""
+            save_config(self.cfg)
+        self.assertEqual(code, 0)
+        self.assertIn("依据：xiuqiu-site 的项目说明、交接《阶段一交接》", out)
+        sent = json.loads(client.calls[0]["user"])
+        self.assertEqual([b["source"] for b in sent["project_briefs"]], ["brief:website"])   # path-bearing purpose dropped
+        self.assertNotIn("/Users/x/secret", client.calls[0]["user"])
+        self.assertLessEqual(len(sent["handoffs"][0]["content"]), 1500)
+
+    def test_menu_offers_the_ask_dialog(self):
+        from xiaomao.swiftbar import render_menu
+        line = next(l for l in render_menu(self.home).splitlines() if l.startswith("问小猫…"))
+        self.assertIn("ask-dialog.py", line)
+        self.assertIn("terminal=false", line)
+
+    def test_dialog_passes_text_only_as_argv(self):
+        import importlib.util
+        import base64
+        spec = importlib.util.spec_from_file_location(
+            "ask_dialog", Path(__file__).resolve().parents[1] / "scripts" / "ask-dialog.py")
+        dialog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dialog)
+        calls = []
+
+        def fake_osascript(script, *args):
+            calls.append((script, args))
+            reply = 'x"; do shell script "rm -rf ~"' if "default answer" in script else "好"
+            return type("P", (), {"returncode": 0, "stdout": reply})()
+        payload = base64.urlsafe_b64encode(json.dumps([str(self.home)]).encode()).decode()
+        seen = {}
+
+        def fake_ask(ns, home, out, err):
+            seen["q"] = ns.question
+            out.write("ANSWER-TEXT")
+            return 0
+        with patch.object(dialog, "osascript", fake_osascript), patch("xiaomao.ask.ask_command", fake_ask):
+            self.assertEqual(dialog.main(["ask-dialog.py", payload]), 0)
+        self.assertEqual(seen["q"], 'x"; do shell script "rm -rf ~"')     # data, never script text
+        self.assertTrue(all(arg not in script for script, args in calls for arg in args))
+        self.assertEqual(calls[-1][1], ("ANSWER-TEXT",))
 
 
 if __name__ == "__main__":
