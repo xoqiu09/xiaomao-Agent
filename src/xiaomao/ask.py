@@ -31,7 +31,10 @@ SYSTEM = (
     "你是小猫，用户的个人项目进度秘书。只根据用户消息里给出的晚报记录回答问题，"
     "不要猜测，不要补充记录以外的内容。用简体中文白话回答，不超过 8 句，"
     "说出具体做了哪些事，不要只说「有更新」；提到代码时说明它在哪：未提交、仅本机、已推送或已合并。"
-    "未提交、未推送的数量以最新一天的记录为准。"
+    "每天的 status 列出所有项目当天结束时的状态，包括当天没有变化的项目："
+    "unpushed_commits 是只在本机、还没推送的提交数；uncommitted_files 是还没提交的文件数；"
+    "pushed_not_merged 是已经推送、还没合进主分支的提交数，它们不算「没推送」。"
+    "这些数量以最新一天的记录为准。"
     "sources 填你用到的记录日期（YYYY-MM-DD，必须来自记录）。"
     "记录里没有答案时，not_in_records 填 true，answer 简短说明没有记录。只输出 JSON。"
 )
@@ -61,13 +64,22 @@ def project_facts(project: dict) -> dict:
     states = info.get("commits", {})
     commits = [{"title": _commit_text(c), "where": _state_label(states.get(c["sha"]), info.get("has_remote"))}
                for c in reversed(project.get("commits", []))]
-    facts = {"project": project["display_name"], "commits": commits[:MAX_COMMITS_PER_PROJECT],
-             "uncommitted_files": info.get("dirty_files", 0), "unpushed_commits": len(info.get("unpushed", []))}
+    facts = {"project": project["display_name"], "commits": commits[:MAX_COMMITS_PER_PROJECT]}
     if len(commits) > MAX_COMMITS_PER_PROJECT:
         facts["more_commits"] = len(commits) - MAX_COMMITS_PER_PROJECT
-    if info.get("has_remote") is False:
-        facts["no_remote"] = True
     return facts
+
+
+def project_status(project: dict) -> dict | None:
+    """End-of-day counts for any project, changed that day or not; None when all zero."""
+    info = project.get("delivery_state") or {}
+    status = {"uncommitted_files": info.get("dirty_files", 0), "unpushed_commits": len(info.get("unpushed", [])),
+              "pushed_not_merged": sum(s == "pushed" for s in info.get("commits", {}).values())}
+    if not any(status.values()):
+        return None
+    if info.get("has_remote") is False:
+        status["no_remote"] = True
+    return {"project": project["display_name"], **status}
 
 
 def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
@@ -81,6 +93,7 @@ def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
         days.append({"date": bundle["window"]["date"], "summary": plain_summary_line(bundle),
                      "projects": [project_facts(p) for p in chosen if p["changed"]],
                      "no_change": [p["display_name"] for p in chosen if not p["changed"]],
+                     "status": [s for s in map(project_status, chosen) if s],
                      "next_steps": [s for s in plain_next_steps(bundle)
                                     if not project or any(s.startswith(p["display_name"] + "：") for p in chosen)][:3]})
     while len(days) > 1 and len(json.dumps(days, ensure_ascii=False)) > PACKET_CHAR_BUDGET:
