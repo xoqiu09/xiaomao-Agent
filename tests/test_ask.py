@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from tests.plain_scenario import NOW, build, make_day
 from xiaomao.ask import ask_command, build_packet, recent_bundles, validated
+from xiaomao.config import save_config
 from xiaomao.daily_jobs import run_daily
 from xiaomao.store import open_db, open_db_readonly, set_meta
 
@@ -30,6 +31,8 @@ class AskTests(unittest.TestCase):
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.cfg, cls.repos = build(Path(cls._tmp.name))
+        cls.cfg.timezone = "Asia/Taipei"
+        save_config(cls.cfg)
         make_day(cls.cfg, cls.repos)
         with patch("xiaomao.collect.utc_now", return_value=NOW.isoformat()):
             run_daily(cls.cfg, date="2026-10-02", now=NOW)
@@ -53,7 +56,7 @@ class AskTests(unittest.TestCase):
 
     def packet(self, project=None):
         with open_db_readonly(self.db) as conn:
-            return build_packet(recent_bundles(conn, days=7, until="2026-10-03"), project)
+            return build_packet(recent_bundles(conn, self.cfg, days=7, until="2026-10-03"), project)
 
     def test_packet_holds_only_stored_report_facts(self):
         days = self.packet()
@@ -74,6 +77,33 @@ class AskTests(unittest.TestCase):
         self.assertEqual([s["project"] for s in days[0]["status"]], ["笔记工具"])
         self.assertTrue(days[0]["status"][0]["no_remote"])
         self.assertTrue(all(s.startswith("笔记工具") for s in days[0]["next_steps"]))
+        self.assertNotIn("xiuqiu-site", days[0]["summary"])
+        self.assertTrue(days[0]["summary"].startswith("今天 1 个项目有进展"))
+
+    def test_revoked_window_is_never_sent_to_model(self):
+        from dataclasses import replace
+        save_config(replace(self.cfg, projects=[p for p in self.cfg.projects if p.project_id != "website"]))
+        try:
+            code, _out, _err, client = self.ask(project="website")
+            self.assertEqual((code, len(client.calls)), (2, 0))
+            _code, _out, _err, client = self.ask()
+            self.assertEqual(json.loads(client.calls[0]["user"])["records"], [])
+        finally:
+            save_config(self.cfg)
+
+    def test_window_scope_and_date_must_match_row_metadata(self):
+        import sqlite3
+        with sqlite3.connect(":memory:") as conn, open_db_readonly(self.db) as original:
+            conn.execute("CREATE TABLE daily_windows(date, scope_hash, bundle_json, completed_at)")
+            date, scope_hash, raw, finished = original.execute(
+                "SELECT date, scope_hash, bundle_json, completed_at FROM daily_windows").fetchone()
+            conn.execute("INSERT INTO daily_windows VALUES(?,?,?,?)", (date, scope_hash, raw, finished))
+            conn.execute("INSERT INTO daily_windows VALUES(?,?,?,?)", (date, "other", "{", finished))
+            self.assertEqual(len(recent_bundles(conn, self.cfg, days=7, until=date)), 1)
+            bundle = json.loads(raw)
+            for bad in (dict(bundle, scope=[]), dict(bundle, window={"date": "2000-01-01"})):
+                conn.execute("UPDATE daily_windows SET bundle_json=? WHERE scope_hash=?", (json.dumps(bad), scope_hash))
+                self.assertEqual(recent_bundles(conn, self.cfg, days=7, until=date), [])
 
     def test_status_covers_projects_without_changes_that_day(self):
         """10/31: mini-exchange did not change but still held 5 unpushed commits."""
@@ -165,12 +195,11 @@ class AskTests(unittest.TestCase):
 
     def test_project_briefs_and_handoffs_are_bounded_sources(self):
         from xiaomao.documents import DocumentStore
-        from xiaomao.config import save_config
-        briefing = self.home / "reports" / "briefing"
-        briefing.mkdir(parents=True, exist_ok=True)
-        (briefing / "website.json").write_text(json.dumps(
-            {"understanding": {"purpose": "个人网站，展示简报与学习内容。", "identities": [{"note": "/Users/x/secret"}]}}))
-        (briefing / "wallet.json").write_text(json.dumps({"understanding": {"purpose": "见 src/wallet/core.ts 文件"}}))
+        from xiaomao.briefing import BriefingSource, briefing_path_for, write_cache
+        for project_id, purpose in [("website", "个人网站，展示简报与学习内容。"), ("wallet", "见 src/wallet/core.ts 文件")]:
+            source = BriefingSource(project_id, briefing_path_for(self.cfg, project_id), "", "a" * 64, 0)
+            write_cache(self.cfg, source, {"purpose": purpose, "identities": [{"note": "/Users/x/secret"}]},
+                        model=self.cfg.ask_model, chunk_count=1)
         library = Path(self.enterContext(tempfile.TemporaryDirectory()))
         doc = DocumentStore(library).save(title="阶段一交接", content="下一步：补测试。" * 400,
                                           source="claude-code", request_id="req-1")
@@ -189,6 +218,26 @@ class AskTests(unittest.TestCase):
         self.assertEqual([b["source"] for b in sent["project_briefs"]], ["brief:website"])   # path-bearing purpose dropped
         self.assertNotIn("/Users/x/secret", client.calls[0]["user"])
         self.assertLessEqual(len(sent["handoffs"][0]["content"]), 1500)
+
+    def test_brief_digest_does_not_follow_old_registration_or_read_raw_document(self):
+        from dataclasses import replace
+        from xiaomao.ask import project_briefs
+        from xiaomao.briefing import BriefingSource, briefing_path_for, cache_paths, write_cache
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = replace(self.cfg, home=tmp)
+            spec = cfg.project("website")
+            source = BriefingSource("website", briefing_path_for(cfg, "website"), "", "a" * 64, 0)
+            write_cache(cfg, source, {"purpose": "原来的用途"}, model=cfg.ask_model, chunk_count=1)
+            with patch("xiaomao.briefing.load_source", side_effect=AssertionError("read source")):
+                self.assertEqual(project_briefs(cfg, "website")[0]["purpose"], "原来的用途")
+                moved = replace(cfg, projects=[replace(spec, approved_root=tmp)])
+                self.assertEqual(project_briefs(moved, "website"), [])
+                self.assertEqual(project_briefs(replace(cfg, briefing_docs_root=tmp), "website"), [])
+                body, meta = cache_paths(cfg, "website")
+                body.write_text(body.read_text().replace("原来的用途", "错误的用途"))
+                self.assertEqual(project_briefs(cfg, "website"), [])
+                meta.unlink()
+                self.assertEqual(project_briefs(cfg, "website"), [])
 
     def test_menu_offers_the_ask_dialog(self):
         from xiaomao.swiftbar import render_menu

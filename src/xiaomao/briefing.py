@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from xiaomao.config import AppConfig
+from xiaomao.config import AppConfig, ProjectSpec
+from xiaomao.handoff_view import _read_file, scope_identity
 from xiaomao.paths import layout
 from xiaomao.policy import (
     ensure_within_root,
@@ -518,6 +519,7 @@ def write_cache(
     body_path, meta_path = cache_paths(cfg, source.project_id)
     payload = {
         "project_id": source.project_id,
+        "scope_sha256": scope_identity(cfg.project(source.project_id)),
         "prompt_version": PROMPT_VERSION,
         "source_sha256": source.sha256,
         "source_bytes": source.nbytes,
@@ -534,6 +536,8 @@ def write_cache(
             "prompt_version": PROMPT_VERSION,
             "source_sha256": source.sha256,
             "body_sha256": sha256_bytes(body.encode("utf-8")),
+            "scope_sha256": payload["scope_sha256"],
+            "source_path": str(source.path),
             "model": model,
             "generated_at": payload["generated_at"],
             "chunk_count": chunk_count,
@@ -546,28 +550,48 @@ def write_cache(
     return body_path
 
 
-def load_cached_understanding(cfg: AppConfig, project_id: str) -> dict[str, Any] | None:
-    if not PROJECT_ID_RE.fullmatch(project_id):
+def read_cached_digest(cfg: AppConfig, project: ProjectSpec, *, allow_legacy: bool = False) -> dict[str, Any] | None:
+    """Read a bound digest. Only a caller that verifies the source bytes may allow old unbound caches."""
+    project_id = project.project_id
+    source_path = briefing_path_for(cfg, project_id)
+    if source_path is None or project_exclusion_reason(project):
         return None
     body_path, meta_path = cache_paths(cfg, project_id)
-    if not body_path.is_file() or not meta_path.is_file():
-        return None
+    folder = body_path.parent
     try:
-        body_text = body_path.read_text(encoding="utf-8")
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        payload = json.loads(body_text)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        if folder.resolve() != Path(cfg.home).resolve() / "reports" / "briefing":
+            return None
+        meta = json.loads(_read_file(meta_path, folder, 16 * 1024))
+        if not isinstance(meta, dict) or meta.get("project_id") != project_id:
+            return None
+        legacy = allow_legacy and "scope_sha256" not in meta and "source_path" not in meta
+        if not legacy and (meta.get("scope_sha256") != scope_identity(project)
+                           or meta.get("source_path") != str(source_path)):
+            return None
+        body = _read_file(body_path, folder, MAX_BRIEFING_BYTES)
+        if meta.get("body_sha256") != sha256_bytes(body):
+            return None
+        payload = json.loads(body)
+    except (OSError, ValueError, RuntimeError):
         return None
-    if not isinstance(payload, dict) or not isinstance(meta, dict):
+    if (not isinstance(payload, dict) or payload.get("project_id") != project_id
+            or payload.get("source_path") != str(source_path) or not isinstance(payload.get("understanding"), dict)
+            or payload.get("source_sha256") != meta.get("source_sha256")
+            or payload.get("scope_sha256") != meta.get("scope_sha256")):
         return None
-    if meta.get("project_id") != project_id or payload.get("project_id") != project_id:
+    return payload
+
+
+def load_cached_understanding(cfg: AppConfig, project_id: str) -> dict[str, Any] | None:
+    try:
+        project = cfg.project(project_id)
+    except KeyError:
         return None
-    if meta.get("body_sha256") != sha256_bytes(body_text.encode("utf-8")):
+    payload = read_cached_digest(cfg, project, allow_legacy=True)
+    if payload is None:
         return None
     source, status = load_source(cfg, project_id)
-    if status != "ok" or source is None:
-        return None
-    if meta.get("source_sha256") != source.sha256 or payload.get("source_sha256") != source.sha256:
+    if status != "ok" or source is None or payload.get("source_sha256") != source.sha256:
         return None
     understanding = coerce_understanding(payload.get("understanding"))
     if validate_understanding(understanding, require_purpose=True):
@@ -656,6 +680,10 @@ def ingest_project(
         return result
     cached = load_cached_understanding(cfg, project_id)
     if cached is not None and cached.get("source_sha256") == source.sha256:
+        if "scope_sha256" not in cached:
+            # Explicit ingest verified the source bytes; bind old caches without another inference.
+            write_cache(cfg, source, cached["understanding"], model=cached.get("model") or "unknown",
+                        chunk_count=int(cached.get("chunk_count") or 0))
         result["status"] = "unchanged"
         result["chunks"] = int(cached.get("chunk_count") or 0)
         result["path"] = str(cache_paths(cfg, project_id)[0])

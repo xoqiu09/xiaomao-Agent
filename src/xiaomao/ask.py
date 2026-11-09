@@ -56,15 +56,30 @@ SYSTEM = (
 )
 
 
-def recent_bundles(conn, *, days: int, until: str) -> list[dict]:
+def recent_bundles(conn, cfg, *, days: int, until: str) -> list[dict]:
     """The latest stored bundle of each window date in [until - days + 1, until]."""
+    from xiaomao.daily_jobs import _hash
+    from xiaomao.report_access import scope_set
+    scope = scope_set(cfg)
+    if not scope:
+        return []
     start = (Date.fromisoformat(until) - timedelta(days=days - 1)).isoformat()
     latest = {}
     for day, raw in conn.execute(
-            "SELECT date, bundle_json FROM daily_windows WHERE date BETWEEN ? AND ? ORDER BY completed_at",
-            (start, until)):
+            "SELECT date, bundle_json FROM daily_windows WHERE scope_hash=? AND date BETWEEN ? AND ? "
+            "ORDER BY completed_at, rowid", (_hash(scope), start, until)):
         latest[day] = raw
-    return [json.loads(latest[day]) for day in sorted(latest)]
+    records = []
+    for day, raw in sorted(latest.items()):
+        try:
+            bundle = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(bundle, dict) and bundle.get("scope") == scope:
+            window = bundle.get("window")
+            if isinstance(window, dict) and window.get("date") == day:
+                records.append(bundle)
+    return records
 
 
 def _matches(project: dict, wanted: str | None) -> bool:
@@ -106,12 +121,12 @@ def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
         chosen = [p for p in bundle["projects"] if _matches(p, project)]
         if project and not chosen:
             continue
-        days.append({"date": bundle["window"]["date"], "summary": plain_summary_line(bundle),
+        scoped = {"projects": chosen}
+        days.append({"date": bundle["window"]["date"], "summary": plain_summary_line(scoped),
                      "projects": [project_facts(p) for p in chosen if p["changed"]],
                      "no_change": [p["display_name"] for p in chosen if not p["changed"]],
                      "status": [s for s in map(project_status, chosen) if s],
-                     "next_steps": [s for s in plain_next_steps(bundle)
-                                    if not project or any(s.startswith(p["display_name"] + "：") for p in chosen)][:3]})
+                     "next_steps": plain_next_steps(scoped)[:3]})
     while len(days) > 1 and len(json.dumps(days, ensure_ascii=False)) > PACKET_CHAR_BUDGET:
         days.pop(0)
     return days
@@ -119,19 +134,16 @@ def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
 
 def project_briefs(cfg, project: str | None = None) -> list[dict]:
     """The purpose line of each existing briefing digest; nothing else of it is passed on."""
-    from xiaomao.briefing import cache_paths
+    from xiaomao.briefing import read_cached_digest
     from xiaomao.menu_briefing import contains_file_path
-    from xiaomao.scope import project_exclusion_reason
     briefs = []
     for spec in cfg.projects:
-        if project_exclusion_reason(spec) or not _matches(
-                {"project_id": spec.project_id, "display_name": spec.display_name}, project):
+        if not _matches({"project_id": spec.project_id, "display_name": spec.display_name}, project):
             continue
-        path = cache_paths(cfg, spec.project_id)[0]
-        try:
-            purpose = json.loads(path.read_text(encoding="utf-8"))["understanding"]["purpose"]
-        except (OSError, ValueError, KeyError, TypeError):
+        cache = read_cached_digest(cfg, spec)
+        if cache is None:
             continue
+        purpose = cache["understanding"].get("purpose")
         if isinstance(purpose, str) and purpose.strip() and not contains_file_path(purpose):
             briefs.append({"source": f"brief:{spec.project_id}", "project": spec.display_name or spec.project_id,
                            "purpose": purpose.strip()[:MAX_BRIEF_CHARS]})
@@ -237,7 +249,7 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
         if infer_paused(conn):
             err.write("推理已暂停，没有调用模型。可用 xiaomao resume infer 恢复。\n")
             return 3
-        records = build_packet(recent_bundles(conn, days=days, until=today), ns.project)
+        records = build_packet(recent_bundles(conn, cfg, days=days, until=today), ns.project)
     if ns.project and not records:
         err.write(f"最近 {days} 天还没有这个项目的晚报记录。\n")
         return 2
