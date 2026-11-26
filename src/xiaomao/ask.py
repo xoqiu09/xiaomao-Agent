@@ -195,11 +195,12 @@ def validated(result: dict | None, sources: set[str]) -> dict | None:
         return None
     if kind == "general":
         return {"kind": kind, "answer": answer[:2000], "sources": []}
+    if data.get("not_in_records") is True:
+        return {"kind": kind, "answer": "现有资料里没有这项记录。", "sources": [], "not_in_records": True}
     cited = sorted({s for s in data.get("sources") or [] if isinstance(s, str) and s in sources})
-    not_found = data.get("not_in_records") is True
-    if not cited and not not_found:
+    if not cited:
         return None
-    return {"kind": kind, "answer": answer[:2000], "sources": cited, "not_in_records": not_found}
+    return {"kind": kind, "answer": answer[:2000], "sources": cited, "not_in_records": False}
 
 
 def answer_question(cfg, question: str, packet: dict, labels: dict, client, model: str) -> dict:

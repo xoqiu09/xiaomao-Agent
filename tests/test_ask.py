@@ -140,11 +140,18 @@ class AskTests(unittest.TestCase):
         self.assertIn("没有注明依据", err)
         self.assertIsNone(validated({"json": {"answer": "", "sources": [], "not_in_records": True}}, {"2026-10-02"}))
 
-    def test_not_in_records_is_said_plainly(self):
-        code, out, _err, _ = self.ask("上个月部署了吗", reply={"answer": "这几天的记录里没有部署信息。",
-                                                          "sources": [], "not_in_records": True})
-        self.assertEqual(code, 0)
-        self.assertEqual(out, "这几天的记录里没有部署信息。\n")
+    def test_not_in_records_ignores_the_models_claim(self):
+        for sources in ([], ["2026-10-02"]):
+            with self.subTest(sources=sources):
+                code, out, _err, _ = self.ask("上个月部署了吗", reply={
+                    "kind": "project",
+                    "answer": "样例项目已经部署。",
+                    "sources": sources,
+                    "not_in_records": True,
+                    "handoff_question": "",
+                })
+                self.assertEqual(code, 0)
+                self.assertEqual(out, "现有资料里没有这项记录。\n")
 
     def test_model_failure_and_paused_inference(self):
         class Broken:

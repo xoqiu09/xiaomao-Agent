@@ -142,7 +142,10 @@ def due_dates(cfg, conn, now: datetime) -> list[str]:
     first = Date.fromisoformat(completed_date(cfg, first_seen)) + timedelta(days=1)
     last = Date.fromisoformat(completed_date(cfg, now))
     completed = {r["date"]: r for r in conn.execute(
-        "SELECT * FROM daily_windows WHERE scope_hash=?", (_scope_hash(cfg),))}
+        "SELECT date, completed_at, CASE WHEN json_valid(bundle_json) "
+        "THEN json_extract(bundle_json, '$.commit_links_through') END AS commit_links_through "
+        "FROM daily_windows WHERE scope_hash=? AND date BETWEEN ? AND ?",
+        (_scope_hash(cfg), first.isoformat(), last.isoformat()))}
     dates = []
     day = first
     while day <= last and len(dates) < MAX_CATCHUP:
@@ -153,10 +156,15 @@ def due_dates(cfg, conn, now: datetime) -> list[str]:
         else:
             # Commits learned after a sleep can repair a previously published window.
             start, end = report_window(cfg, name)
+            through = previous["commit_links_through"]
+            if through is None:  # Reports saved before the collection position was recorded.
+                column, boundary = "first_seen", previous["completed_at"]
+            else:
+                column, boundary = "rowid", through
             late = any(conn.execute(
                 "SELECT 1 FROM daily_commit_links WHERE scope_key=? AND effective_at>=? "
-                "AND effective_at<? AND first_seen>? LIMIT 1",
-                (key, start.isoformat(), end.isoformat(), previous["completed_at"])).fetchone()
+                f"AND effective_at<? AND {column}>? LIMIT 1",
+                (key, start.isoformat(), end.isoformat(), boundary)).fetchone()
                 for key in keys)
             if late:
                 dates.append(name)
@@ -266,6 +274,10 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
             # Surfaced as a collection gap: coverage becomes partial.
             effective._inventory_errors = [*getattr(effective, "_inventory_errors", []), LOCK_BUSY_NOTE]
         with open_db(paths["db"]) as conn:
+            # Read the append-only commit links and the bundles from one SQLite snapshot.
+            # A later change to the wording must keep this collection position.
+            conn.execute("BEGIN")
+            commit_links_through = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM daily_commit_links").fetchone()[0]
             if scheduled and not date:
                 dates = due_dates(effective, conn, now)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]
@@ -273,6 +285,7 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
         # Read-only Git ref queries, outside any database transaction.
         from xiaomao.delivery_state import annotate_bundle
         for bundle in bundles:
+            bundle["commit_links_through"] = commit_links_through
             annotate_bundle(bundle)
         # Pass 1: the rule version is published and notified before any model
         # work, so a slow or missing model never delays the evening report.

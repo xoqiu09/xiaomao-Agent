@@ -172,6 +172,54 @@ class DailyJobTests(unittest.TestCase):
             notify_once(conn, self.cfg, repaired, lambda *a: calls.append(a) or True)
         self.assertEqual(len(calls), 1)
 
+    def test_model_supplement_keeps_a_late_commit_due(self):
+        from xiaomao.daily_jobs import due_dates, run_daily
+
+        cfg = self.cfg
+        cfg.timezone = "Asia/Taipei"
+        save_config(cfg)
+        day = "2026-10-02"
+        commit_subject = "Record a late commit"
+        published = datetime.fromisoformat(f"{day}T13:35:00+00:00")
+        discovered = datetime.fromisoformat(f"{day}T13:37:00+00:00")
+        supplemented = datetime.fromisoformat(f"{day}T13:40:00+00:00")
+        next_check = datetime.fromisoformat(f"{day}T13:45:00+00:00")
+        notifications, pending_during_model = [], []
+
+        def notifier(date, *_):
+            notifications.append(date)
+            return True
+
+        class Client:
+            def generate_json(client, **kwargs):
+                if not pending_during_model:
+                    with patch.dict("os.environ", {"GIT_COMMITTER_DATE": f"{day}T13:25:00+00:00"}):
+                        (self.repo / "late.py").write_text("late = True\n")
+                        git(self.repo, "add", "late.py")
+                        git(self.repo, "commit", "-m", commit_subject)
+                    with open_db(self.db) as conn, patch("xiaomao.collect.utc_now", return_value=discovered.isoformat()):
+                        scan_authorized(conn, cfg)
+                        pending_during_model.append(due_dates(cfg, conn, discovered))
+                    publish_clock.return_value = supplemented.isoformat()
+                return response(json.loads(kwargs["user"]))
+
+        with (patch("xiaomao.collect.utc_now", return_value=published.isoformat()) as scan_clock,
+              patch("xiaomao.daily_jobs.utc_now", return_value=published.isoformat()) as publish_clock):
+            run_daily(cfg, date="2026-10-01", now=published)
+            path, = run_daily(cfg, scheduled=True, now=published, client_factory=lambda _: Client(), notifier=notifier)
+            body = path.read_text()
+            self.assertEqual(pending_during_model, [[day]])
+            self.assertIn("已补充解读", body)
+            self.assertNotIn(commit_subject, body)
+
+            scan_clock.return_value = publish_clock.return_value = next_check.isoformat()
+            repaired = run_daily(cfg, scheduled=True, now=next_check, client_factory=lambda _: None, notifier=notifier)
+        self.assertEqual(repaired, [path], "补写解读后，定时任务没有重新生成当天晚报")
+        self.assertIn(commit_subject, path.read_text())
+        self.assertEqual(notifications, [day])
+        with open_db(self.db) as conn:
+            self.assertEqual(due_dates(cfg, conn, next_check), [])
+
     def test_cli_coverage_and_config_and_schema_upgrade(self):
         import io
         from contextlib import redirect_stdout
