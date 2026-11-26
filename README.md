@@ -6,32 +6,30 @@
 
 ## 每天你会收到什么
 
-每晚 21:30 结束当天的统计，大约 21:45 前送达一份晚报，同时弹一条系统通知。下面是一份真实的晚报：
+每晚 21:30 结束当天的统计，大约 21:45 前送达一份晚报，同时弹一条系统通知。下面是一份晚报示例（项目名和数字是虚构的，格式和真实晚报一致）：
 
 ```
 小猫晚报 · 11月9日（周一）
-今天 2 个项目有进展，2 个项目共 6 个提交还没推送。
+今天 2 个项目有进展，2 个项目共 4 个提交还没推送。
 
-★ Session Steward
-  · Merge pull request #69 from xoqiu09/codex/ux-round2-20261109  🟢 已合并
-  · fix: clarify project selection and adapt town map controls  🟢 已合并
-  · Merge pull request #68 from xoqiu09/codex/ux-walkthrough-20…  🟢 已合并
-  （另有 3 项变化，见依据）
-  （另有 10 处改动还没提交）
+★ 读书笔记站
+  · Merge pull request #12 from example/search-page  🟢 已合并
+  · fix: keep the tag filter when paging  🔵 已推送
+  （另有 2 项变化，见依据）
+  （另有 6 处改动还没提交）
 
-★ xiuqiu-site
-  · content(radar): 2026-11-09 daily AI and Web3 briefs (#146)  🟢 已合并
-  · content(market-radar): 2026-11-09 MEXC order snapshot (#145)  🟢 已合并
-  （另有 27 处改动还没提交）
+★ 记账小工具
+  · feat: export monthly summary as CSV  🟠 仅本机
+  （另有 9 处改动还没提交）
 
 明天从这里继续
-  1. QAI：推送本地的 5 个提交
-  2. xiuqiu-site：27 处未提交改动，建议分批提交
-  3. Wallet-Infrastructure：推送本地的 1 个提交
+  1. 记账小工具：推送本地的 3 个提交
+  2. 读书笔记站：6 处未提交改动，建议分批提交
+  3. 旅行清单：推送本地的 1 个提交
 
-今天没动：QAI、wallet-core、xiaomao-Agent、AI-Web3-Learning、Wallet-Infrastructure、旷野之心、mini-exchange
-7 处采集问题，详见依据 → 菜单「查看依据」
-MacBook 上还没推送的工作，小猫看不到。
+今天没动：旅行清单、家庭相册、练习题库
+2 处采集问题，详见依据 → 菜单「查看依据」
+另一台电脑上还没推送的工作，小猫看不到。
 ```
 
 每条改动后面的标记表示代码现在在哪：
