@@ -197,10 +197,10 @@ def validated(result: dict | None, sources: set[str]) -> dict | None:
         return {"kind": kind, "answer": answer[:2000], "sources": []}
     if data.get("not_in_records") is True:
         return {"kind": kind, "answer": "现有资料里没有这项记录。", "sources": [], "not_in_records": True}
-    cited = sorted({s for s in data.get("sources") or [] if isinstance(s, str) and s in sources})
-    if not cited:
+    cited = {s for s in data.get("sources") or [] if isinstance(s, str)}
+    if not cited or not cited.issubset(sources):
         return None
-    return {"kind": kind, "answer": answer[:2000], "sources": cited, "not_in_records": False}
+    return {"kind": kind, "answer": answer[:2000], "sources": sorted(cited), "not_in_records": False}
 
 
 def answer_question(cfg, question: str, packet: dict, labels: dict, client, model: str) -> dict:
