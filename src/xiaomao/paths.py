@@ -14,11 +14,15 @@ STORAGE_BUDGET_BYTES = 2 * 1024 * 1024 * 1024
 POLICY_VERSION = "1"
 
 
+def formal_home() -> Path:
+    return (Path.home() / "Library" / "Application Support" / APP_DIR_NAME).resolve()
+
+
 def default_home() -> Path:
     override = os.environ.get("XIAOMAO_HOME")
     if override:
         return Path(override).expanduser().resolve()
-    return (Path.home() / "Library" / "Application Support" / APP_DIR_NAME).resolve()
+    return formal_home()
 
 
 def layout(home: Path) -> dict[str, Path]:
