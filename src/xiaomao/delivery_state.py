@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from xiaomao.git_readonly import GitReadError, run_git
 
@@ -152,6 +153,10 @@ def annotate_project(project: dict, now: datetime | None = None) -> dict:
         info["commits"][sha] = state
     unpushed = {}
     if view["has_remote"]:
+        info["unpushed_incomplete"] = (
+            any(not t.get("head") for t in live)
+            or len(live) < sum(not t.get("gone") for t in project["trees"])
+        )
         # Reserve each tree's HEAD history before adding candidates from other branches.
         for other_branches in (False, True):
             ref_group = "branches" if other_branches else "head"
@@ -215,12 +220,82 @@ def annotate_project(project: dict, now: datetime | None = None) -> dict:
     return info
 
 
-def annotate_bundle(bundle: dict) -> dict:
-    # Ages are measured at the window's end, so a regenerated report reads the same.
-    now = datetime.fromisoformat(bundle["window"]["end"]) if bundle.get("window") else None
+def annotate_bundle(bundle: dict, *, saved: dict | None = None, checked_at: str | None = None) -> dict:
+    recheck = saved is not None or is_backfill(bundle)
+    reference_at = (checked_at or bundle["generated_at"]) if recheck else bundle.get("window", {}).get("end")
+    now = datetime.fromisoformat(reference_at) if reference_at else None
     for project in bundle["projects"]:
-        annotate_project(project, now)
+        info = annotate_project(project, now)
+        if checked_at and not recheck and not bundle.get("preview"):
+            info["unpushed_window_at"] = checked_at
+    preserve_window_delivery(bundle, saved, checked_at=checked_at)
     return bundle
+
+
+def is_backfill(bundle: dict) -> bool:
+    window = bundle.get("window", {})
+    if not bundle.get("generated_at") or not window.get("timezone"):
+        return False
+    observed = datetime.fromisoformat(bundle["generated_at"]).astimezone(ZoneInfo(window["timezone"]))
+    return observed.date().isoformat() > window["date"]
+
+
+def unpushed_count(info: dict) -> tuple[int | None, bool]:
+    """The count and whether it is only a lower bound."""
+    count = len(info.get("unpushed", []))
+    incomplete = bool(info.get("unpushed_incomplete"))
+    if info.get("has_remote") is None or (not count and incomplete):
+        return None, False
+    return count, incomplete
+
+
+def _window_delivery(bundle: dict, info: dict) -> tuple[dict, str | None]:
+    if check := info.get("unpushed_check"):
+        at = info.get("unpushed_window_at")
+        if not at:
+            return {}, None
+        if "commits" not in check:
+            # Older backfills kept the old unpushed list but replaced the commit labels.
+            local = set(info.get("unpushed", []))
+            info = dict(info, commits={sha: "local" for sha in info.get("commits", {}) if sha in local},
+                        merged_by_content=[], unpushed_stale=[], unpushed_unchecked=[], errors=[],
+                        default_ref=None, default_basis=None)
+        return info, at
+    if info and not is_backfill(bundle):
+        return info, info.get("unpushed_window_at") or bundle.get("generated_at")
+    return {}, None
+
+
+def preserve_window_delivery(bundle: dict, saved: dict | None = None, *, checked_at: str | None = None) -> None:
+    """Keep a regenerated report's live query separate from the saved observation."""
+    previous = {p["repo_id"]: p.get("delivery_state") or {} for p in (saved or {}).get("projects", [])}
+    recheck = saved is not None or is_backfill(bundle)
+    for project in bundle["projects"]:
+        info = project.get("delivery_state") or {}
+        existing = info.get("unpushed_check")
+        if not info or (existing and "commits" in existing) or (not existing and not recheck):
+            continue
+        if existing:
+            # Read old, mixed bundles without borrowing their live labels for the window.
+            old, window_at = _window_delivery(bundle, info)
+            count, incomplete = existing["count"], existing["incomplete"]
+            if info.get("has_remote") is None or (not count and incomplete):
+                count, incomplete = None, False
+        else:
+            old, window_at = _window_delivery(saved or {}, previous.get(project["repo_id"], {}))
+            count, incomplete = unpushed_count(info)
+        check = {"at": existing["at"] if existing else (checked_at or bundle["generated_at"]), "count": count,
+                 "incomplete": incomplete, "commits": info.get("commits", {}),
+                 "has_remote": info.get("has_remote"), "errors": info.get("errors", [])}
+        project["delivery_state"] = dict(
+            has_remote=old.get("has_remote"), default_ref=old.get("default_ref"),
+            default_basis=old.get("default_basis"), commits=old.get("commits", {}),
+            merged_by_content=old.get("merged_by_content", []), unpushed=old.get("unpushed", []),
+            unpushed_stale=old.get("unpushed_stale", []), unpushed_unchecked=old.get("unpushed_unchecked", []),
+            unpushed_incomplete=old.get("unpushed_incomplete", False), errors=old.get("errors", []),
+            dirty_files=info.get("dirty_files", 0), dirty_trees=info.get("dirty_trees", 0),
+            unpushed_check=check, unpushed_window_at=window_at,
+        )
 
 
 def unit_state(unit: dict, project: dict) -> str | None:

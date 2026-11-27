@@ -316,21 +316,25 @@ def cmd_features(ns: argparse.Namespace) -> int:
 
 def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
     from xiaomao.briefing import ingest_authorized
+    from xiaomao.store import infer_paused
 
     home = _home_from_args(ns)
-    ensure_layout(home)
+    paths = ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
     if ns.project:
         if reason := project_exclusion_reason(cfg.project(ns.project)):
             sys.stderr.write(f"范围已排除：{reason}\n")
             return 3
-    with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0):
-        results = ingest_authorized(
-            cfg,
-            project_id=ns.project,
-            client_factory=lambda: _briefing_client(cfg),
-        )
+    def check_paused():
+        if not paths["db"].exists():
+            return False
+        with open_db_readonly(paths["db"]) as conn:
+            return infer_paused(conn)
+
+    with ScanLock(paths["lock"], retries=5, retry_s=1.0):
+        results = ingest_authorized(cfg, project_id=ns.project, client_factory=lambda: _briefing_client(cfg),
+                                    check_paused=check_paused)
     json.dump({"results": results}, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     failed = not results or any(row.get("status") not in ("ok", "unchanged") for row in results)

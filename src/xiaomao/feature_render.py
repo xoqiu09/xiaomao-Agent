@@ -342,12 +342,24 @@ def _issue_count(bundle, notes):
 
 def plain_summary_line(bundle):
     """First line of the plain report; also the notification headline."""
+    from xiaomao.delivery_state import unpushed_count
+
     active = sum(p["changed"] for p in bundle["projects"])
     unpushed = []
+    unknown = []
+    missing_window = None
     for project in bundle["projects"]:
         info = project.get("delivery_state") or {}
-        if info.get("unpushed"):
-            unpushed.append((project["display_name"], len(info["unpushed"]), info.get("unpushed_incomplete")))
+        if not info:
+            continue
+        count, incomplete = unpushed_count(info)
+        if count:
+            unpushed.append((project["display_name"], count, incomplete))
+        elif count is None:
+            if info.get("unpushed_check") and not info.get("unpushed_window_at"):
+                missing_window = info["unpushed_check"]["at"]
+            else:
+                unknown.append(project["display_name"])
     line = f"今天 {active} 个项目有进展" if active else "今天没有新的进展"
     unread = [p["display_name"] for p in bundle["projects"] if not p["changed"] and not p.get("scan_succeeded", True)]
     if unread:
@@ -361,7 +373,15 @@ def plain_summary_line(bundle):
     elif unpushed:
         minimum = "至少" if any(incomplete for _, _, incomplete in unpushed) else ""
         line += f"，{len(unpushed)} 个项目共{minimum} {sum(n for _, n, _ in unpushed)} 个提交还没推送"
-    return line + "。"
+    line += "。"
+    if unknown:
+        target = unknown[0] if len(unknown) == 1 else f"{len(unknown)} 个项目"
+        line += f"{target}的未推送数量没查到。"
+    if missing_window:
+        checked = datetime.fromisoformat(missing_window)
+        local = checked.astimezone(ZoneInfo(bundle["window"]["timezone"]))
+        line += f"补报查询于 {local:%Y-%m-%d %H:%M}，当天截止时的未推送数量没有记录。"
+    return line
 
 
 def _ranked_active(bundle, notes):
@@ -411,7 +431,8 @@ def render_plain_summary(bundle, notes, *, supplemented=False):
         lines.append("")
     steps = plain_next_steps(bundle)
     if steps:
-        lines.append("明天从这里继续")
+        rechecked = any((p.get("delivery_state") or {}).get("unpushed_check") for p in bundle["projects"])
+        lines.append("当晚留下的下一步" if rechecked else "明天从这里继续")
         lines.extend(f"  {n}. {text}" for n, text in enumerate(steps[:3], 1))
         lines.append("")
     quiet = [p["display_name"] for p in bundle["projects"]

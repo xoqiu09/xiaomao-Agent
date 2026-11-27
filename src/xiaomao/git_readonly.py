@@ -4,7 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence, overload
 
 from xiaomao.modules import classify_module_changes
 
@@ -62,7 +62,18 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+@overload
+def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30,
+            raw: Literal[False] = False) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30,
+            raw: Literal[True]) -> subprocess.CompletedProcess[bytes]: ...
+
+
+def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30,
+            raw: bool = False) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     argv = [
         "git",
         "--no-optional-locks",
@@ -76,19 +87,20 @@ def run_git(worktree: Path, *args: str, check: bool = True, timeout: int = 30) -
             argv,
             check=False,
             capture_output=True,
-            text=True,
+            text=not raw,
             timeout=timeout,
             env=_git_env(),
             shell=False,
-            errors="replace",
+            errors=None if raw else "replace",
         )
     except subprocess.TimeoutExpired as exc:
         raise GitReadError(f"git timed out: {args[0] if args else argv}", argv=argv) from exc
     if check and proc.returncode != 0:
+        stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode("utf-8", "replace")
         raise GitReadError(
-            f"git {args[0] if args else ''} failed ({proc.returncode}): {proc.stderr.strip()}",
+            f"git {args[0] if args else ''} failed ({proc.returncode}): {stderr.strip()}",
             argv=argv,
-            stderr=proc.stderr,
+            stderr=stderr,
         )
     return proc
 
