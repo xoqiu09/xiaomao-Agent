@@ -11,7 +11,7 @@ from xiaomao.collect import register_project, scan_authorized, scan_worktree
 from xiaomao.handoff_view import scope_identity
 from xiaomao.policy import looks_like_secret, path_is_denied, redact_text, safe_excerpt_from_bytes
 from xiaomao.scope import project_exclusion_reason
-from xiaomao.store import evidence_for_observation, latest_observation, open_db
+from xiaomao.store import evidence_for_observation, last_scan_success, latest_observation, open_db
 from tests.helpers import git, init_repo
 
 
@@ -130,6 +130,36 @@ class CollectTests(unittest.TestCase):
             {row["worktree_id"]: row["observation_id"] for row in proof["observation_ids"]},
             {row["worktree_id"]: row["observation_id"] for row in results},
         )
+
+    def test_head_changes_during_scan_do_not_update_last_success(self) -> None:
+        from xiaomao.git_readonly import _head_state
+
+        root = self._tmp()
+        repo = init_repo(root / "repo")
+        home = root / "home"
+        cfg, project, _ = _cfg(home, repo)
+        first_at = "2026-10-02T03:00:00+00:00"
+        with open_db(home / "xiaomao.sqlite") as conn:
+            with patch("xiaomao.collect.utc_now", return_value=first_at):
+                scan_authorized(conn, cfg)
+            before = _head_state(repo)
+            git(repo, "commit", "--allow-empty", "-m", "new head")
+            after = _head_state(repo)
+            for at in ("2026-10-02T03:05:00+00:00", "2026-10-02T03:10:00+00:00"):
+                with (patch("xiaomao.collect.utc_now", return_value=at),
+                      patch("xiaomao.git_readonly._head_state", side_effect=[before, after])):
+                    result = scan_authorized(conn, cfg)[project.project_id][0]
+                with self.subTest(scan=at):
+                    self.assertEqual(result["status"], "inconsistent")
+            runs = conn.execute("SELECT outcome, last_safe_error FROM scan_runs ORDER BY rowid").fetchall()
+            with self.subTest(check="失败原因"):
+                self.assertEqual([tuple(row) for row in runs], [
+                    ("success", None),
+                    ("error", "HEAD changed during scan"),
+                    ("error", "HEAD changed during scan"),
+                ])
+            with self.subTest(check="最近一次扫描成功"):
+                self.assertEqual(last_scan_success(conn)["finished_at"], first_at)
 
     def test_success_event_proves_current_run_scope_and_all_tree_observations(self) -> None:
         root = self._tmp()

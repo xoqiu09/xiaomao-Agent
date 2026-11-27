@@ -219,6 +219,8 @@ def scan_worktree(
                                  if k not in {"units", "snapshot"}} for item in snap.content_changes]
         snap.evidence_limitations.append("storage_budget")
     fingerprint = snapshot_fingerprint(snap)
+    repeated_status = "unchanged" if snap.collection_status == "ok" else snap.collection_status
+    scan_error = {"error": snap.error} if snap.error else {}
     last = latest_observation(conn, wt.worktree_id)
     if _matches_observation(last, fingerprint, snap.collection_status):
         # Still record discovered worktrees so new trees surface as candidates.
@@ -232,10 +234,12 @@ def scan_worktree(
             scan_enabled=wt.scan,
             notes=wt.notes,
         )
-        _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, last["observation_id"])
+        daily_evidence_ok = _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, last["observation_id"])
         return {
             "worktree_id": wt.worktree_id,
-            "status": "unchanged",
+            "status": repeated_status,
+            **scan_error,
+            "daily_evidence_ok": daily_evidence_ok,
             "inserted": False,
             "observation_id": last["observation_id"],
             "fingerprint": fingerprint,
@@ -272,7 +276,9 @@ def scan_worktree(
         _record_discovered(conn, project, wt, snap)
         return {
             "worktree_id": wt.worktree_id,
-            "status": "unchanged",
+            "status": repeated_status,
+            **scan_error,
+            "daily_evidence_ok": False,
             "inserted": False,
             "observation_id": observation_id,
             "fingerprint": fingerprint,
@@ -291,11 +297,13 @@ def scan_worktree(
     )
     _record_discovered(conn, project, wt, snap)
     _insert_status_evidence(conn, observation_id, observed_at, snap)
-    _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, observation_id)
+    daily_evidence_ok = _record_daily_snapshot(conn, cfg, project, wt, snap, observed_at, observation_id)
 
     return {
         "worktree_id": wt.worktree_id,
         "status": snap.collection_status,
+        **scan_error,
+        "daily_evidence_ok": daily_evidence_ok,
         "inserted": True,
         "observation_id": observation_id,
         "fingerprint": fingerprint,
@@ -312,7 +320,7 @@ def scan_worktree(
     }
 
 
-def _record_daily_snapshot(conn, cfg, project, wt, snap, at, observation_id):
+def _record_daily_snapshot(conn, cfg, project, wt, snap, at, observation_id) -> bool:
     from xiaomao.activity import record_snapshot
     try:
         record_snapshot(conn, cfg, project, wt, snap, at, observation_id)
@@ -321,6 +329,8 @@ def _record_daily_snapshot(conn, cfg, project, wt, snap, at, observation_id):
         # separate daily-evidence failure in coverage, never as "no changes".
         insert_event(conn, kind="daily_evidence_error", project_id=project.project_id,
                      payload={"worktree_id": wt.worktree_id, "error": type(exc).__name__})
+        return False
+    return True
 
 
 def _authorized(project: ProjectSpec, path: str) -> bool:
@@ -593,7 +603,7 @@ def scan_project(conn, cfg: AppConfig, project_id: str) -> list[dict]:
         if not wt.scan:
             continue
         results.append(scan_worktree(conn, cfg, project, wt))
-    errors = [r.get("error") for r in results if r.get("status") == "error"]
+    errors = [r.get("error") for r in results if r.get("status") in {"error", "inconsistent"}]
     exclusions = [r.get("reason") for r in results if r.get("status") == "excluded"]
     if not results:
         outcome = "skip"

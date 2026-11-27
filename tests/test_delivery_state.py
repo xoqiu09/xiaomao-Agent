@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -149,6 +149,70 @@ class DeliveryStateTests(unittest.TestCase):
         info = annotate_project(project, now=datetime.now(timezone.utc))
         self.assertEqual(info["unpushed"], [new])
         self.assertEqual(info["unpushed_stale"], [old])
+
+    def test_capped_branch_queries_keep_each_worktree_head(self):
+        work = clone_with_default(self.root, "main")
+        first_tree = self.root / "first-tree"
+        git(work, "worktree", "add", "-b", "first", str(first_tree))
+        now = datetime.now(timezone.utc)
+        with patch.dict(os.environ, {"GIT_COMMITTER_DATE": (now - timedelta(minutes=2)).isoformat()}):
+            first = commit(first_tree, "first.txt")
+        git(work, "switch", "-c", "second")
+        second = commit(work, "second.txt")
+        project = project_for(work, [], [])
+        project["trees"].append({"tree_id": "first", "path": str(first_tree), "head": first})
+
+        with patch("xiaomao.delivery_state.MAX_UNPUSHED", 1):
+            info = annotate_project(project)
+
+        self.assertEqual(info["unpushed"], sorted([first, second]))
+
+    def test_truncated_branch_query_marks_push_reminder_as_a_lower_bound(self):
+        from xiaomao.daily_jobs import notification_text
+        from xiaomao.feature_render import plain_next_steps
+
+        work = clone_with_default(self.root, "main")
+        git(work, "switch", "-c", "notes")
+        commit(work, "first.txt")
+        second = commit(work, "second.txt")
+        git(work, "switch", "main")
+        project = dict(project_for(work, [], []), display_name="笔记", changed=False)
+        bundle = {"projects": [project]}
+        with patch("xiaomao.delivery_state.MAX_UNPUSHED", 1):
+            info = annotate_project(project)
+
+        self.assertEqual(info["unpushed"], [second])
+        with self.subTest(surface="通知"):
+            self.assertIn("至少 1 个提交还没推送", notification_text(bundle)[0])
+        with self.subTest(surface="明天从这里继续"):
+            self.assertEqual(plain_next_steps(bundle), ["笔记：推送本地的至少 1 个提交"])
+
+    def test_merge_checks_prioritize_recent_push_candidates_and_record_unchecked_ones(self):
+        from xiaomao.daily import delivery_lines
+        from xiaomao.daily_jobs import notification_text
+
+        work = clone_with_default(self.root, "main")
+        now = datetime.now(timezone.utc)
+        old_a, old_b, recent_merged, recent_local, recent_unchecked = [ch * 40 for ch in "abcde"]
+        candidates = [old_a, old_b, recent_merged, recent_local, recent_unchecked]
+        times = {sha: now - timedelta(days=30) if sha in (old_a, old_b) else now for sha in candidates}
+        project = dict(project_for(work, [], []), display_name="笔记", changed=False)
+        with (patch("xiaomao.delivery_state.MAX_CONTENT_CHECKS", 2),
+              patch("xiaomao.delivery_state.unpushed_commits",
+                    side_effect=lambda path, view, **kwargs: [] if kwargs.get("other_branches") else candidates),
+              patch("xiaomao.delivery_state.commit_times", side_effect=lambda _, shas: {s: times[s] for s in shas}),
+              patch("xiaomao.delivery_state.merged_by_content",
+                    side_effect=lambda _, sha, view: sha == recent_merged) as check):
+            info = annotate_project(project, now)
+
+        with self.subTest(check="先核对近期提交"):
+            self.assertEqual([call.args[1] for call in check.call_args_list], [recent_merged, recent_local])
+        with self.subTest(check="只提醒已核对且仍未推送的提交"):
+            self.assertEqual(info["unpushed"], [recent_local])
+            self.assertIn("至少 1 个提交还没推送", notification_text({"projects": [project]})[0])
+        with self.subTest(check="未核对的提交留在依据"):
+            self.assertEqual(info.get("unpushed_unchecked"), [old_a, old_b, recent_unchecked])
+            self.assertIn(recent_unchecked[:12], "\n".join(delivery_lines(info)))
 
     def test_reading_state_changes_nothing_in_repository(self):
         work = clone_with_default(self.root, "main")
