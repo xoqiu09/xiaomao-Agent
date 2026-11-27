@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xiaomao.cli import main
-from xiaomao.config import save_config
+from xiaomao.config import load_config, save_config
 from xiaomao.schedule import DAILY_PLIST_NAME, PLIST_NAME
 from xiaomao.store import get_meta, open_db_readonly
 from tests.helpers import init_repo, website_fixture_config
@@ -123,3 +123,27 @@ class CliTests(unittest.TestCase):
         self.assertIn("最近一次扫描成功", out)
         self.assertIn("推理已暂停", out)
         self.assertIn("推理已恢复", out)
+
+    def test_scan_preserves_notification_setting_saved_after_config_read(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        repo = init_repo(root / "repo")
+        home = root / "home"
+        cfg = website_fixture_config(home, repo, extra_root=root)
+        cfg.daily_notify = True
+        save_config(cfg)
+        home_args = ["--home", str(home)]
+
+        def read_then_disable_notifications(scan_home: Path):
+            scan_cfg = load_config(scan_home)
+            self.assertTrue(scan_cfg.daily_notify)
+            self.assertEqual(main([*home_args, "projects", "configure", "--notify", "off"]), 0)
+            self.assertFalse(load_config(home).daily_notify)
+            return scan_cfg
+
+        with (
+            redirect_stdout(io.StringIO()),
+            patch("xiaomao.cli.load_config", side_effect=read_then_disable_notifications),
+        ):
+            self.assertEqual(main([*home_args, "scan"]), 0)
+
+        self.assertFalse(load_config(home).daily_notify, "scan restored the old notification setting")
