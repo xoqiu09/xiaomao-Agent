@@ -12,7 +12,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from xiaomao.config import AppConfig, ProjectSpec
 from xiaomao.handoff_view import _read_file, scope_identity
@@ -676,6 +676,7 @@ def ingest_project(
     *,
     client: Any | None = None,
     model: str | None = None,
+    check_paused: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     source, status = load_source(cfg, project_id)
     result: dict[str, Any] = {
@@ -701,15 +702,19 @@ def ingest_project(
         return result
     if client is None:
         result["status"] = "degraded"
-        result["errors"] = ["model_unavailable"]
+        result["errors"] = ["infer_paused" if check_paused and check_paused() else "model_unavailable"]
         return result
     tag = model or (cfg.depth_candidates[0] if cfg.depth_candidates else cfg.lite_model)
     chunks = split_chunks(source.text)
     result["chunks"] = len(chunks)
     understanding = empty_understanding()
     errors: list[str] = []
+    paused = False
     try:
         for chunk in chunks:
+            if check_paused and check_paused():
+                paused = True
+                break
             try:
                 delta = extract_chunk(
                     client, model=tag, project_id=project_id, previous=understanding, chunk=chunk
@@ -732,6 +737,9 @@ def ingest_project(
                 stop(tag)
             except Exception:
                 pass
+    if paused or (check_paused and check_paused()):
+        result.update(status="degraded", errors=["infer_paused"])
+        return result
     problems = validate_understanding(understanding, require_purpose=True)
     if errors or problems:
         result["status"] = "degraded"
@@ -750,6 +758,7 @@ def ingest_authorized(
     client: Any | None = None,
     model: str | None = None,
     client_factory: Any | None = None,
+    check_paused: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     if project_id:
         ids = [project_id]
@@ -760,7 +769,8 @@ def ingest_authorized(
     for pid in ids:
         if active is None and client_factory is not None:
             source, _ = load_source(cfg, pid)
-            if source is not None and _cache_for_ingest(cfg, source) is None:
+            if (source is not None and _cache_for_ingest(cfg, source) is None
+                    and not (check_paused and check_paused())):
                 active = client_factory()
-        results.append(ingest_project(cfg, pid, client=active, model=model))
+        results.append(ingest_project(cfg, pid, client=active, model=model, check_paused=check_paused))
     return results

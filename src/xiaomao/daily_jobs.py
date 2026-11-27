@@ -250,10 +250,12 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
               client_factory=None, notifier=macos_notification,
               lock_wait_s=LOCK_WAIT_S) -> list[Path]:
     from xiaomao.collect import scan_authorized
+    from xiaomao.delivery_state import annotate_bundle
     from xiaomao.inventory import effective_config
     from xiaomao.lock import ScanLock
     from xiaomao.reports import daily_path
     from xiaomao.store import infer_paused
+    fixed_now = now
     now = now or datetime.now(timezone.utc)
     today = now.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()
     paths = ensure_layout(Path(cfg.home))
@@ -303,12 +305,23 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
                 if rebuild_today and today not in dates:
                     dates.append(today)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]
+            saved_windows = {}
+            for bundle in bundles:
+                if bundle["preview"]:
+                    continue
+                key = _record_key(bundle)
+                row = conn.execute("SELECT bundle_json FROM daily_windows WHERE window_key=? "
+                                   "AND json_valid(bundle_json)", (key,)).fetchone()
+                if row:
+                    saved = json.loads(row["bundle_json"])
+                    if isinstance(saved, dict):
+                        saved_windows[key] = saved
             paused = infer_paused(conn)
         # Read-only Git ref queries, outside any database transaction.
-        from xiaomao.delivery_state import annotate_bundle
         for bundle in bundles:
             bundle["commit_links_through"] = commit_links_through
-            annotate_bundle(bundle)
+            checked_at = (fixed_now or datetime.now(timezone.utc)).isoformat()
+            annotate_bundle(bundle, saved=saved_windows.get(_record_key(bundle)), checked_at=checked_at)
         # Pass 1: the rule version is published and notified before any model
         # work, so a slow or missing model never delays the evening report.
         wants_model = (scheduled or with_model) and not paused

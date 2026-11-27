@@ -97,12 +97,10 @@ def blob_text(repo: Path, ref: str | None, rel: str) -> tuple[str | None, str]:
     if int(size.stdout.strip()) > MAX_FILE_BYTES:
         return None, "oversize"
     # Raw cat-file does not run textconv, external diff or checkout filters.
-    raw = run_git(repo, "cat-file", "blob", obj, check=False)
+    raw = run_git(repo, "cat-file", "blob", obj, check=False, raw=True)
     if raw.returncode:
         return None, "unreadable"
-    if "\0" in raw.stdout or "\ufffd" in raw.stdout:
-        return None, "binary"
-    return raw.stdout, "ok"
+    return _decode(raw.stdout)
 
 
 def digest(text: str | None) -> str | None:
@@ -195,7 +193,8 @@ def commit_evidence(repo: Path, oid: str) -> dict:
             row["availability"] = f"{bs}/{als}"
             limitations.append(f"{rel}: {bs}/{als}")
             continue
-        row.update(availability="ok", content_hash=digest(after), before_hash=digest(before))
+        row.update(availability="ok", content_hash=digest(after), before_hash=digest(before),
+                   exists=als == "ok")
         excerpt = patch_text(before, after, rel)
         row["patch"] = excerpt[:remaining]
         remaining -= len(row["patch"])

@@ -23,6 +23,16 @@ class DailyRegressionTests(unittest.TestCase):
         with patch("xiaomao.collect.utc_now", return_value=stamp):
             return scan_authorized(self.conn, self.cfg)["website"][0]
 
+    def saved_report(self, day, observed_at):
+        from datetime import datetime
+        from xiaomao.config import save_config
+        from xiaomao.daily_jobs import run_daily
+
+        save_config(self.cfg)
+        with patch("xiaomao.collect.utc_now", return_value=observed_at):
+            path, = run_daily(self.cfg, date=day, now=datetime.fromisoformat(observed_at))
+        return path.read_text()
+
     def test_second_edit_of_same_dirty_file_is_observed(self):
         self.scan("2026-10-01T13:00:00+00:00")
         (self.repo / "README.md").write_text("first edit\n")
@@ -46,6 +56,8 @@ class DailyRegressionTests(unittest.TestCase):
         self.assertNotIn("授权观察范围内无新变化", body)
 
     def test_unpushed_branch_commit_is_reminded_after_switching_to_main(self):
+        from datetime import datetime
+        from xiaomao.daily import build_bundle
         from xiaomao.delivery_state import annotate_bundle
         from xiaomao.feature_render import render_plain_summary
 
@@ -62,10 +74,158 @@ class DailyRegressionTests(unittest.TestCase):
         git(self.repo, "switch", "main")
         self.scan("2026-10-02T03:00:00+00:00")
 
-        body = render_plain_summary(annotate_bundle(self.bundle()), {})
+        bundle = build_bundle(self.cfg, self.conn, date="2026-10-02",
+                              now=datetime.fromisoformat("2026-10-02T13:35:00+00:00"))
+        body = render_plain_summary(annotate_bundle(bundle), {})
         self.assertIn("添加读书笔记  🟠 仅本机", body)
         self.assertIn("笔记 有 1 个提交还没推送", body)
         self.assertIn("明天从这里继续\n  1. 笔记：推送本地的 1 个提交", body)
+
+    def test_backfill_keeps_unpushed_counts_with_their_observation_day(self):
+        from xiaomao.ask import build_packet, recent_bundles
+
+        self.cfg.timezone = "Asia/Taipei"
+        self.cfg.daily_time = "21:30"
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.scan("2026-11-25T13:29:00+00:00")
+        self.conn.commit()
+        (self.repo / "README.md").write_text("new on the 26th\n")
+        git(self.repo, "add", "README.md")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-11-26T01:00:00+00:00"}):
+            git(self.repo, "commit", "-m", "Work from the 26th")
+        sha = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+        late = self.saved_report("2026-11-25", "2026-11-26T02:00:00+00:00")
+        self.assertNotIn("1 个提交还没推送", late)
+        self.assertNotIn("推送本地的", late)
+        self.assertIn("当天截止时的未推送数量没有记录", late)
+        self.assertIn("2026-11-26 10:00", late)
+        detail = Path(self.cfg.home) / "reports/daily-evidence/2026-11-25.txt"
+        self.assertIn("补报查询时间 2026-11-26T02:00:00+00:00 · 未推送提交 1 个", detail.read_text())
+        current = self.saved_report("2026-11-26", "2026-11-26T13:35:00+00:00")
+        self.assertIn("1 个提交还没推送", current)
+
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        rebuilt = self.saved_report("2026-11-26", "2026-11-27T02:00:00+00:00")
+        self.assertIn("1 个提交还没推送", rebuilt)
+        bundles = recent_bundles(self.conn, self.cfg, days=2, until="2026-11-26")
+        days = build_packet(bundles)
+        self.assertNotIn("1 个提交还没推送", days[0]["summary"])
+        self.assertIsNone(days[0]["status"][0]["unpushed_commits"])
+        self.assertEqual(days[1]["status"][0]["unpushed_commits"], 1)
+
+        legacy_info = bundles[0]["projects"][0]["delivery_state"]
+        del legacy_info["unpushed_check"], legacy_info["unpushed_window_at"]
+        legacy_info["has_remote"] = True
+        legacy_info["unpushed"] = [sha]
+        legacy_day, = build_packet(bundles[:1])
+        self.assertIsNone(legacy_day["status"][0]["unpushed_commits"])
+        self.assertEqual(legacy_day["next_steps"], [])
+
+    def test_same_night_and_next_day_rebuilds_keep_the_saved_zero(self):
+        from xiaomao.ask import build_packet, recent_bundles
+
+        day = "2026-11-25"
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.scan("2026-11-25T13:29:00+00:00")
+        self.conn.commit()
+        detail = Path(self.cfg.home) / f"reports/daily-evidence/{day}.txt"
+        self.saved_report(day, "2026-11-25T13:35:00+00:00")
+        self.assertIn("未推送提交 0 个", detail.read_text())
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-11-25T14:00:00+00:00"}):
+            git(self.repo, "commit", "--allow-empty", "-m", "Commit after cutoff")
+
+        for at in ("2026-11-25T15:00:00+00:00", "2026-11-26T02:00:00+00:00"):
+            with self.subTest(at=at):
+                body = self.saved_report(day, at)
+                self.assertNotIn("1 个提交还没推送", body)
+                self.assertIn("未推送提交 0 个（当日记录于 2026-11-25T13:35:00+00:00）", detail.read_text())
+                self.assertIn(f"补报查询时间 {at} · 未推送提交 1 个", detail.read_text())
+                packet, = build_packet(recent_bundles(self.conn, self.cfg, days=1, until=day))
+                self.assertEqual(packet["status"][0]["unpushed_commits"], 0)
+                self.assertEqual(packet["next_steps"], [])
+
+    def test_backfill_reports_original_commit_state_and_dates_the_new_state(self):
+        from xiaomao.ask import build_packet, recent_bundles
+
+        day = "2026-11-25"
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.scan("2026-11-24T13:29:00+00:00")
+        self.conn.commit()
+        (self.repo / "notes.txt").write_text("a local change\n")
+        git(self.repo, "add", "notes.txt")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-11-25T10:00:00+00:00"}):
+            git(self.repo, "commit", "-m", "Add notes")
+        sha = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.saved_report(day, "2026-11-25T13:28:00+00:00")
+        self.saved_report(day, "2026-11-25T13:35:00+00:00")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        at = "2026-11-26T02:00:00+00:00"
+        body = self.saved_report(day, at)
+        detail = (Path(self.cfg.home) / f"reports/daily-evidence/{day}.txt").read_text()
+        packet, = build_packet(recent_bundles(self.conn, self.cfg, days=1, until=day))
+        self.assertIn("1 个提交还没推送", body)
+        self.assertNotIn("🟢 已合并", body)
+        self.assertIn("🟠 仅本机", body)
+        self.assertIn(f"{sha[:12]} → local", detail)
+        self.assertIn(f"补报查询时间 {at} · 未推送提交 0 个\n      {sha[:12]} → merged", detail)
+        self.assertEqual(packet["status"][0]["unpushed_commits"], 1)
+        self.assertEqual(packet["projects"][0]["commits"][0]["where"], "🟠 仅本机")
+        recheck = packet["status"][0]["delivery_recheck"]
+        self.assertEqual((recheck["at"], recheck["unpushed_commits"]), (at, 0))
+        self.assertEqual(recheck["commits"][0]["where"], "🟢 已合并")
+
+    def test_unpushed_count_distinguishes_a_lower_bound_from_no_result(self):
+        from xiaomao.ask import build_packet, recent_bundles
+
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-11-25T10:00:00+00:00"}):
+            git(self.repo, "commit", "--allow-empty", "-m", "Local change")
+        sha = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        (self.repo / "draft.txt").write_text("work in progress\n")
+        self.scan("2026-11-25T13:29:00+00:00")
+        self.conn.commit()
+        for day, found, expected in (("2026-11-25", None, None), ("2026-11-26", [sha], 1)):
+            with self.subTest(day=day):
+                at = f"{day}T13:35:00+00:00"
+                with patch("xiaomao.delivery_state.unpushed_commits",
+                           side_effect=lambda _path, _view, *, other_branches: None if other_branches else found):
+                    body = self.saved_report(day, at)
+                evidence = (Path(self.cfg.home) / f"reports/daily-evidence/{day}.txt").read_text()
+                packet, = build_packet(recent_bundles(self.conn, self.cfg, days=1, until=day))
+                status = packet["status"][0]
+                if found is None:
+                    self.assertIsNone(status["unpushed_commits"])
+                    self.assertIn("未推送数量没查到", body)
+                    self.assertIn("未推送数量没查到", evidence)
+                    self.assertNotIn("未推送提交 0 个", evidence)
+                else:
+                    self.assertIn("至少 1 个提交还没推送", body)
+                    self.assertIn("未推送提交 至少 1 个", evidence)
+                    self.assertTrue(status.get("unpushed_at_least"))
+                self.assertEqual(status["unpushed_commits"], expected)
+
+    def test_backfill_git_failure_does_not_report_a_current_zero(self):
+        from xiaomao.ask import build_packet, recent_bundles
+        from xiaomao.git_readonly import GitReadError
+
+        day, at = "2026-11-25", "2026-11-26T02:00:00+00:00"
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.scan("2026-11-25T13:25:00+00:00")
+        self.conn.commit()
+        with patch("xiaomao.delivery_state.remote_view", side_effect=GitReadError("read failed")):
+            self.saved_report(day, at)
+        detail = (Path(self.cfg.home) / f"reports/daily-evidence/{day}.txt").read_text()
+        packet, = build_packet(recent_bundles(self.conn, self.cfg, days=1, until=day))
+        self.assertIn(f"补报查询时间 {at} · 未推送数量没查到", detail)
+        self.assertIsNone(packet["status"][0]["unpushed_commits"])
+        self.assertIsNone(packet["status"][0]["delivery_recheck"]["unpushed_commits"])
 
     def bundle(self, date="2026-10-02"):
         from datetime import datetime, timezone
@@ -109,6 +269,65 @@ class DailyRegressionTests(unittest.TestCase):
         project = self.bundle()["projects"][0]
         self.assertEqual(project["ongoing"], [])
         self.assertIn("restored", [a["kind"] for a in project["activity"]])
+
+    def test_discarded_draft_is_not_covered_by_an_unrelated_commit(self):
+        from xiaomao.feature_daily import project_units
+
+        self.scan("2026-10-01T13:00:00+00:00")
+        draft = self.repo / "draft.py"
+        draft.write_text("draft = True\n")
+        self.scan("2026-10-02T03:00:00+00:00")
+        draft.unlink()
+        (self.repo / "guide.md").write_text("# Guide\n")
+        git(self.repo, "add", "guide.md")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-10-02T03:02:00+00:00"}):
+            git(self.repo, "commit", "-m", "Add guide")
+        self.scan("2026-10-02T03:05:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        disappearance = next(event for event in project["activity"] if event["kind"] == "resolved")
+        self.assertEqual(disappearance["paths"], ["draft.py"])
+        self.assertEqual(disappearance["covered_by_commits"], [])
+        units = {(unit["path"], unit["kind"], unit["origin"]) for unit in project_units(project)}
+        self.assertIn(("draft.py", "resolved", "activity"), units)
+        self.assertIn(("guide.md", "documentation", "commit"), units)
+
+    def test_deleted_draft_is_not_covered_by_a_commit_retaining_an_empty_file(self):
+        draft = self.repo / "draft.py"
+        draft.write_text("draft = True\n")
+        git(self.repo, "add", "draft.py")
+        git(self.repo, "commit", "-m", "Track draft")
+        self.scan("2026-10-01T13:00:00+00:00")
+        draft.unlink()
+        self.scan("2026-10-02T03:00:00+00:00")
+        draft.write_bytes(b"")
+        git(self.repo, "add", "draft.py")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-10-02T03:02:00+00:00"}):
+            git(self.repo, "commit", "-m", "Keep an empty draft")
+        self.scan("2026-10-02T03:05:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        self.assertEqual(len(project["commits"]), 1)
+        event = next(event for event in project["activity"] if event["kind"] == "resolved")
+        self.assertEqual([event["covered_by_commits"], event["files"][0]["covered_by_commits"]], [[], []])
+
+    def test_draft_with_crlf_is_covered_by_a_commit_with_identical_bytes(self):
+        git(self.repo, "config", "core.autocrlf", "false")
+        self.scan("2026-10-01T13:00:00+00:00")
+        draft = self.repo / "draft.py"
+        content = b"draft = True\r\nprint(draft)\r\n"
+        draft.write_bytes(content)
+        self.scan("2026-10-02T03:00:00+00:00")
+        git(self.repo, "add", "draft.py")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-10-02T03:02:00+00:00"}):
+            git(self.repo, "commit", "-m", "Commit draft with CRLF")
+        self.scan("2026-10-02T03:05:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        commit, = project["commits"]
+        event = next(event for event in project["activity"] if event["kind"] == "workspace")
+        self.assertEqual([event["covered_by_commits"], event["files"][0]["covered_by_commits"]],
+                         [[commit["sha"]], [commit["sha"]]])
 
     def test_two_worktrees_and_clone_deduplicate_commit(self):
         linked = self.root / "linked"

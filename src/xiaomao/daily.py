@@ -8,10 +8,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from xiaomao.activity import stamp
+from xiaomao.change_evidence import digest
 from xiaomao.inventory import effective_config, excluded, metadata, scope_key
 from xiaomao.ops import GAP_WARN_AFTER_S
 from xiaomao.report_access import scope_set
 from xiaomao.scope import project_exclusion_reason
+
+EMPTY_CONTENT_HASH = digest("")
 
 
 def report_window(cfg, date: str) -> tuple[datetime, datetime]:
@@ -39,6 +42,17 @@ def _file_map(state):
 
 def _content_key(row):
     return tuple(row.get(k) for k in ("content_hash", "index_hash", "status", "availability"))
+
+
+def _matches_commit_file(observed, committed):
+    fingerprint = observed.get("content_hash")
+    availability = observed.get("availability")
+    if (observed["path"] != committed["path"] or not fingerprint
+            or fingerprint != committed.get("content_hash") or availability not in {"ok", "absent"}):
+        return False
+    # Older commit evidence uses the empty hash for both deletion and an empty file.
+    exists = committed.get("exists", True if fingerprint != EMPTY_CONTENT_HASH else None)
+    return exists == (availability == "ok")
 
 
 def _event_order(event):
@@ -248,14 +262,13 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
         group["limitations"] = list(dict.fromkeys(group["limitations"]))
         used_contexts = {e.get("context_version") for e in group["commits"] + group["activity"] + group["ongoing"]}
         group["feature_contexts"] = {k: v for k, v in group["feature_contexts"].items() if k in used_contexts}
-        # Link an observed edit to a commit only when the stored content hash agrees.
+        # Link an observed edit only when the path, existence and content agree.
         for event in group["activity"]:
             event["covered_by_commits"] = sorted({
                 commit["sha"] for commit in group["commits"]
-                if ((event["kind"] in {"head_change", "resolved"} and event["head"] == commit["sha"])
+                if ((event["kind"] == "head_change" and event["head"] == commit["sha"])
                      or (event["at"] <= commit["first_seen"] and event["files"]
-                         and all(any(cf["path"] == f["path"] and f.get("content_hash")
-                            and cf.get("content_hash") == f["content_hash"] for cf in commit["files"])
+                         and all(any(_matches_commit_file(f, cf) for cf in commit["files"])
                         for f in event["files"])))
             })
             event["followed_by_restore"] = next((
@@ -266,8 +279,8 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             ), None)
             for file in event["files"]:
                 file["covered_by_commits"] = sorted({c["sha"] for c in group["commits"]
-                    if event["at"] <= c["first_seen"] and file.get("content_hash") and any(
-                        f["path"] == file["path"] and f.get("content_hash") == file["content_hash"] for f in c["files"])})
+                    if event["at"] <= c["first_seen"] and any(
+                        _matches_commit_file(file, f) for f in c["files"])})
                 file["followed_by_restore"] = next((later["evidence_id"] for later in group["activity"]
                     if event["kind"] == "workspace" and not file.get("resolution_kind")
                     and later["tree_id"] == event["tree_id"] and _event_order(later) > _event_order(event)
@@ -311,15 +324,31 @@ def project_lines(project) -> list[str]:
     return lines
 
 
+def _unpushed_evidence(count, incomplete):
+    if count is None:
+        return "未推送数量没查到"
+    minimum = "至少 " if incomplete else ""
+    return f"未推送提交 {minimum}{count} 个"
+
+
 def delivery_lines(info: dict) -> list[str]:
     """Evidence view of the four delivery states, with their basis."""
+    from xiaomao.delivery_state import unpushed_count
+
     remote = {True: "有", False: "无（只判定未提交 / 仅本机）", None: "未能读取"}[info["has_remote"]]
     basis = {"remote_head": "origin/HEAD", "conventional_name": "按常用名推定，未记录 origin/HEAD",
              None: "未确定，不判定已合并"}[info["default_basis"]]
-    minimum = "至少 " if info.get("unpushed_incomplete") else ""
-    lines = [f"  代码位置（生成时）：远端 {remote} · 默认分支 {info['default_ref'] or '—'}（依据：{basis}）",
-             "    依据为本机 refs/remotes，不 fetch；其他机器推送后本机未同步的提交可能仍显示为仅本机。",
-             f"    未推送提交 {minimum}{len(info['unpushed'])} 个 · 未提交文件 {info['dirty_files']} 个"]
+    observed = info.get("unpushed_window_at")
+    check = info.get("unpushed_check")
+    when = f"当日记录于 {observed}" if observed and check else "生成时"
+    lines = [f"  代码位置（{when}）：远端 {remote} · 默认分支 {info['default_ref'] or '—'}（依据：{basis}）",
+             "    依据为本机 refs/remotes，不 fetch；其他机器推送后本机未同步的提交可能仍显示为仅本机。"]
+    unpushed = _unpushed_evidence(*unpushed_count(info))
+    if observed:
+        unpushed += f"（当日记录于 {observed}）"
+    elif check:
+        unpushed = "当天截止时的未推送数量没有记录"
+    lines.append(f"    {unpushed} · 未提交文件 {info['dirty_files']} 个")
     content = set(info.get("merged_by_content", []))
     for sha, state in info["commits"].items():
         basis = "（改动内容已在默认分支：rebase 或压缩合并）" if sha in content else ""
@@ -335,6 +364,10 @@ def delivery_lines(info: dict) -> list[str]:
         lines.append(f"    尚未核对是否按内容合并的提交 {len(unchecked)} 个："
                      + "、".join(s[:12] for s in unchecked))
     lines.extend(f"    读取问题：{e}" for e in info["errors"])
+    if check:
+        lines.append(f"    补报查询时间 {check['at']} · {_unpushed_evidence(check['count'], check['incomplete'])}")
+        lines.extend(f"      {sha[:12]} → {state or 'unknown'}" for sha, state in check.get("commits", {}).items())
+        lines.extend(f"      读取问题：{e}" for e in check.get("errors", []))
     return lines
 
 

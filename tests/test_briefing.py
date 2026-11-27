@@ -302,6 +302,74 @@ class BriefingTests(unittest.TestCase):
         cached = load_cached_understanding(cfg, "website")
         self.assertEqual(cached["understanding"]["invariants"], ["静态审查不等于当前运行通过"])
 
+    def test_cli_ingest_preserves_digest_while_inference_is_paused(self) -> None:
+        _root, home = self._home()
+        cfg = load_config(home)
+        self.assertEqual(ingest_project(cfg, "website", client=FakeClient())["status"], "ok")
+        paths = cache_paths(cfg, "website")
+        previous = [path.read_bytes() for path in paths]
+        prefix = ["--home", str(home)]
+        ingest = prefix + ["ingest-briefing", "--project", "website"]
+        doc = Path(cfg.briefing_docs_root) / "website" / "00-项目说明.md"
+        client = FakeClient()
+
+        with redirect_stdout(io.StringIO()), patch("xiaomao.cli._briefing_client", return_value=client) as factory:
+            self.assertEqual(main(prefix + ["pause", "infer"]), 0)
+            self.assertEqual(main(ingest), 0)
+            doc.write_text("用途：记录新版个人项目。\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()) as output:
+                status = main(ingest)
+            self.assertEqual(len(client.calls), 0)
+            factory.assert_not_called()
+            self.assertEqual(status, 3)
+            self.assertEqual(json.loads(output.getvalue())["results"][0]["errors"], ["infer_paused"])
+            self.assertEqual([path.read_bytes() for path in paths], previous)
+
+            self.assertEqual(main(prefix + ["resume", "infer"]), 0)
+            self.assertEqual(main(ingest), 0)
+            factory.assert_called_once()
+            self.assertEqual(len(client.calls), 1)
+            self.assertNotEqual([path.read_bytes() for path in paths], previous)
+
+    def test_cli_ingest_stops_requesting_chunks_after_inference_is_paused(self) -> None:
+        _root, home = self._home()
+        cfg = load_config(home)
+        self.assertEqual(ingest_project(cfg, "website", client=FakeClient())["status"], "ok")
+        paths = cache_paths(cfg, "website")
+        previous = [path.read_bytes() for path in paths]
+        doc = Path(cfg.briefing_docs_root) / "website" / "00-项目说明.md"
+        updated = SAMPLE_DOC + "\n## 新说明\n新增项目用途和维护边界。\n"
+        doc.write_text(updated, encoding="utf-8")
+        chunk_count = len(split_chunks(updated))
+        self.assertGreater(chunk_count, 1)
+        prefix = ["--home", str(home)]
+        argv = prefix + ["ingest-briefing", "--project", "website"]
+        client = FakeClient()
+        generate = client.generate_json
+
+        def pause_after_first_chunk(**kwargs):
+            answer = generate(**kwargs)
+            if len(client.calls) == 1:
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(prefix + ["pause", "infer"]), 0)
+            return answer
+
+        with (
+            patch("xiaomao.cli._briefing_client", return_value=client),
+            patch.object(client, "generate_json", side_effect=pause_after_first_chunk),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            status = main(argv)
+            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(status, 3)
+            self.assertEqual(json.loads(output.getvalue())["results"][0]["errors"], ["infer_paused"])
+            self.assertEqual([path.read_bytes() for path in paths], previous)
+
+            self.assertEqual(main(prefix + ["resume", "infer"]), 0)
+            self.assertEqual(main(argv), 0)
+            self.assertEqual(len(client.calls), chunk_count + 1)
+            self.assertNotEqual([path.read_bytes() for path in paths], previous)
+
     def test_scan_does_not_ingest(self) -> None:
         _root, home = self._home()
         buf = io.StringIO()

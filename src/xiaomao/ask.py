@@ -51,6 +51,8 @@ SYSTEM = (
     "answer 用一句话说明为什么没把握，handoff_question 写一句用户可以直接发给 Codex 或 Claude 的问题。"
     "records 每天的 status 列出所有项目当天结束时的状态，包括当天没有变化的项目："
     "unpushed_commits 是只在本机、还没推送的提交数；uncommitted_files 是还没提交的文件数；"
+    "unpushed_commits 为 null 表示当天没查到，不能当成 0；unpushed_at_least 为 true 表示至少这么多。"
+    "next_steps 是当时的建议。delivery_recheck 是补报查询的结果，按 at 的时间说明，不能当成当天的记录。"
     "pushed_not_merged 是已经推送、还没合进主分支的提交数，它们不算「没推送」。"
     "这些数量以最新一天的记录为准。"
 )
@@ -102,12 +104,29 @@ def project_facts(project: dict) -> dict:
 
 
 def project_status(project: dict) -> dict | None:
-    """End-of-day counts for any project, changed that day or not; None when all zero."""
+    """End-of-day counts and any separately dated follow-up."""
+    from xiaomao.delivery_state import unpushed_count
+    from xiaomao.feature_render import _commit_text, _state_label
+
     info = project.get("delivery_state") or {}
-    status = {"uncommitted_files": info.get("dirty_files", 0), "unpushed_commits": len(info.get("unpushed", [])),
+    check = info.get("unpushed_check")
+    observed = info.get("unpushed_window_at")
+    unpushed, minimum = unpushed_count(info)
+    status = {"uncommitted_files": info.get("dirty_files", 0), "unpushed_commits": unpushed,
               "pushed_not_merged": sum(s == "pushed" for s in info.get("commits", {}).values())}
-    if not any(status.values()):
+    if not check and not (info and unpushed is None) and not any(status.values()):
         return None
+    if minimum:
+        status["unpushed_at_least"] = True
+    if check:
+        states = check.get("commits", {})
+        status["delivery_recheck"] = {
+            "at": check["at"], "unpushed_commits": check["count"], "unpushed_at_least": check["incomplete"],
+            "commits": [{"title": _commit_text(c), "where": _state_label(states[c["sha"]], check.get("has_remote"))}
+                        for c in reversed(project.get("commits", [])) if states.get(c["sha"])][:MAX_COMMITS_PER_PROJECT],
+        }
+    if observed:
+        status["unpushed_window_at"] = observed
     if info.get("has_remote") is False:
         status["no_remote"] = True
     return {"project": project["display_name"], **status}
@@ -115,13 +134,15 @@ def project_status(project: dict) -> dict | None:
 
 def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
     """Per-day facts the model may use; oldest days drop first to fit the budget."""
+    from xiaomao.delivery_state import preserve_window_delivery
     from xiaomao.feature_render import plain_next_steps, plain_summary_line
     days = []
     for bundle in bundles:
-        chosen = [p for p in bundle["projects"] if _matches(p, project)]
+        chosen = [dict(p) for p in bundle["projects"] if _matches(p, project)]
         if project and not chosen:
             continue
-        scoped = {"projects": chosen}
+        scoped = dict(bundle, projects=chosen)
+        preserve_window_delivery(scoped)
         days.append({"date": bundle["window"]["date"], "summary": plain_summary_line(scoped),
                      "projects": [project_facts(p) for p in chosen if p["changed"]],
                      "no_change": [p["display_name"] for p in chosen if not p["changed"]],
