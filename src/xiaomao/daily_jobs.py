@@ -9,9 +9,9 @@ from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from xiaomao.daily import build_bundle, completed_date, render_bundle, report_window
+from xiaomao.daily import build_bundle, completed_date, render_bundle, report_window, window_key
 from xiaomao.paths import ensure_layout, layout
-from xiaomao.report_access import bind_report, scope_set
+from xiaomao.report_access import bind_report, read_bound_report, scope_set
 from xiaomao.store import open_db, utc_now
 
 from xiaomao.feature_daily import (PROMPT_VERSION, SYSTEM, model_packet, prepare_inference,
@@ -252,15 +252,35 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
     from xiaomao.collect import scan_authorized
     from xiaomao.inventory import effective_config
     from xiaomao.lock import ScanLock
+    from xiaomao.reports import daily_path
     from xiaomao.store import infer_paused
     now = now or datetime.now(timezone.utc)
+    today = now.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()
     paths = ensure_layout(Path(cfg.home))
     written = []
     with ScanLock(Path(cfg.home) / "daily.lock"):
+        rebuild_today = False
         with open_db(paths["db"]) as conn:
-            dates = due_dates(cfg, conn, now) if scheduled and not date else [
-                date or now.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()]
-        if not dates:
+            dates = due_dates(cfg, conn, now) if scheduled and not date else [date or today]
+            # Manual generation can finish today's report without claiming its notification.
+            if (scheduled and not date and cfg.daily_notify
+                    and today == completed_date(cfg, now) and today not in dates):
+                key = window_key(cfg, today)
+                saved = conn.execute(
+                    "SELECT bundle_json FROM daily_windows WHERE window_key=? AND json_valid(bundle_json) "
+                    "AND NOT EXISTS (SELECT 1 FROM daily_notifications WHERE window_key=?)",
+                    (f"{key}:{_scope_hash(cfg)}", key),
+                ).fetchone()
+                if saved is not None:
+                    bundle = json.loads(saved["bundle_json"])
+                    try:
+                        read_bound_report(daily_path(cfg, today), Path(cfg.home), cfg, "daily",
+                                          daily_bundle=bundle)
+                    except (OSError, ValueError):
+                        rebuild_today = True
+                    else:
+                        notify_once(conn, cfg, bundle, notifier)
+        if not dates and not rebuild_today:
             return []
         effective = effective_config(cfg)
         try:
@@ -280,6 +300,8 @@ def run_daily(cfg, *, date=None, scheduled=False, with_model=False, now=None,
             commit_links_through = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM daily_commit_links").fetchone()[0]
             if scheduled and not date:
                 dates = due_dates(effective, conn, now)
+                if rebuild_today and today not in dates:
+                    dates.append(today)
             bundles = [build_bundle(effective, conn, date=d, now=now) for d in dates]
             paused = infer_paused(conn)
         # Read-only Git ref queries, outside any database transaction.

@@ -74,7 +74,6 @@ def cmd_scan(ns: argparse.Namespace) -> int:
     ensure_layout(home)
     cfg = load_config(home)
     cfg.home = str(home)
-    save_config(cfg)
     dest = None
     project_id = ns.project
     try:

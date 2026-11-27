@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import plistlib
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import chdir, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+from xiaomao import schedule
 from xiaomao.cli import main
 from xiaomao.config import default_config, save_config
 from xiaomao.eval_runner import host_pressure, self_check_validators
@@ -321,6 +327,59 @@ class MigrateLockScheduleTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
         self.assertIn("daily --scheduled", text)
         self.assertNotIn("with-model", text)
+
+    def test_schedule_install_persists_selected_python(self) -> None:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        (home / "config.json").write_text('{"projects": []}', encoding="utf-8")
+        chosen_python = home / "custom bin" / "python3"
+        chosen_python.parent.mkdir()
+        chosen_python.symlink_to(sys.executable)
+        installer_python = str(home / "installer bin" / "python3.11")
+        cases = (
+            ("default", {}, installer_python),
+            ("absolute", {"XIAOMAO_PYTHON": str(chosen_python)}, str(chosen_python)),
+            ("relative", {"XIAOMAO_PYTHON": "./custom bin/python3"}, str(chosen_python)),
+            ("command", {"XIAOMAO_PYTHON": "python3", "PATH": "custom bin"}, str(chosen_python)),
+        )
+        loaded = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            chdir(home),
+            patch.object(schedule.sys, "executable", installer_python),
+            patch.object(schedule, "bootout"),
+            patch.object(schedule, "bootstrap", return_value=loaded),
+        ):
+            for choice, env, expected in cases:
+                with patch.dict(os.environ, env, clear=True):
+                    for install_job in (schedule.install, schedule.install_daily):
+                        with self.subTest(job=install_job.__name__, choice=choice):
+                            path = home / f"{install_job.__name__}.plist"
+                            install_job(home=home, log_dir=home / "logs", path=path)
+                            payload = plistlib.loads(path.read_bytes())
+                            self.assertEqual(payload["EnvironmentVariables"].get("XIAOMAO_PYTHON"), expected)
+
+    def test_schedule_scripts_use_path_python_without_configured_python(self) -> None:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (home / "config.json").write_text('{"projects": []}', encoding="utf-8")
+        python = home / "python3"
+        python.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "-c" ]; then exec "$TEST_PYTHON" "$@"; fi\n'
+            'printf "%s\\n" "$@"\n',
+            encoding="utf-8",
+        )
+        python.chmod(0o700)
+        env = {"PATH": str(home), "XIAOMAO_HOME": str(home), "TEST_PYTHON": sys.executable,
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        jobs = (
+            (schedule.scan_program_argv, ["scan"]),
+            (schedule.daily_program_argv, ["daily", "--scheduled"]),
+        )
+        for program_argv, command in jobs:
+            with self.subTest(job=command[0]):
+                proc = subprocess.run(program_argv(home=home), cwd=home, env=env,
+                                      capture_output=True, text=True, timeout=10)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.splitlines(), ["-m", "xiaomao", "--home", str(home), *command])
 
     def test_scan_runs_recorded_and_pause_skips(self) -> None:
         home = Path(self.enterContext(tempfile.TemporaryDirectory())) / "h"

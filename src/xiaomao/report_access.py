@@ -38,12 +38,15 @@ def bind_report(path: Path, text: str, cfg: AppConfig, kind: str, project_id: st
                     interpretation_hash=daily_bundle.get("interpretation_hash"),
                     projects=[{"project_id": p["project_id"], "repo_id": p["repo_id"], "trees": p["trees"]}
                               for p in daily_bundle["projects"]])
+        if kind == "daily":
+            meta["preview"] = daily_bundle["preview"]
     # A concurrent reader can see a mismatched pair, which fails closed.
     from xiaomao.menu_briefing import _atomic_write
     _atomic_write(path.with_suffix(".json"), json.dumps(meta, ensure_ascii=False) + "\n")
 
 
-def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project_id: str | None = None) -> str:
+def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project_id: str | None = None,
+                      *, daily_bundle: dict | None = None) -> str:
     expected = scope_set(cfg, project_id)
     if not expected:
         raise ValueError("没有可读取的授权范围")
@@ -55,6 +58,11 @@ def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project
     if (not isinstance(meta, dict) or meta.get("schema") != "xiaomao-report-scope-v1"
             or meta.get("kind") != kind or meta.get("scope") != expected):
         raise ValueError("旧报告范围未核实；请从当前个人项目重新生成")
+    if daily_bundle is not None and (
+        meta.get("preview", False) != daily_bundle["preview"]
+        or any(meta.get(k) != daily_bundle.get(k) for k in ("window", "evidence_hash", "interpretation_hash"))
+    ):
+        raise ValueError("日报与已记录版本不一致")
     body = _read_file(path, folder, 2 * 1024 * 1024)
     if hashlib.sha256(body).hexdigest() != meta.get("sha256"):
         raise ValueError("报告来源校验失败")

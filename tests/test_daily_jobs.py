@@ -82,6 +82,78 @@ class DailyJobTests(unittest.TestCase):
             notify_once(conn, self.cfg, self.bundle, lambda *args: calls.append(args) or True)
         self.assertEqual(len(calls), 1)
 
+    def test_scheduled_check_notifies_once_after_manual_daily(self):
+        from xiaomao.daily_jobs import run_daily
+
+        cfg = self.cfg
+        cfg.timezone = "Asia/Taipei"
+        cfg.daily_time = "21:30"
+        cfg.daily_notify = True
+        save_config(cfg)
+        day = "2026-10-02"
+        manual = datetime.fromisoformat(f"{day}T21:31:00+08:00")
+        first_check = datetime.fromisoformat(f"{day}T21:35:00+08:00")
+        second_check = datetime.fromisoformat(f"{day}T21:40:00+08:00")
+        notifications = []
+
+        def notifier(date, *_):
+            notifications.append(date)
+            return True
+
+        with patch("xiaomao.collect.utc_now", return_value=manual.astimezone(timezone.utc).isoformat()):
+            run_daily(cfg, date="2026-10-01", now=manual, notifier=notifier)
+            path, = run_daily(cfg, now=manual, notifier=notifier)
+            self.assertTrue(path.is_file())
+            self.assertEqual(notifications, [])
+
+            run_daily(cfg, scheduled=True, now=first_check, notifier=notifier, client_factory=lambda _: None)
+            self.assertEqual(notifications, [day], "21:35 应为手动生成的晚报发送通知")
+
+            run_daily(cfg, scheduled=True, now=second_check, notifier=notifier, client_factory=lambda _: None)
+            self.assertEqual(notifications, [day], "21:40 不应重复发送")
+
+    def test_scheduled_check_rebuilds_daily_overwritten_by_preview_before_notifying(self):
+        from xiaomao.daily_jobs import run_daily
+        from xiaomao.report_access import read_bound_report
+
+        cfg = self.cfg
+        cfg.timezone = "Asia/Taipei"
+        cfg.daily_time = "21:30"
+        cfg.daily_notify = True
+        save_config(cfg)
+        home = Path(cfg.home)
+        day = "2026-10-02"
+        manual = datetime.fromisoformat(f"{day}T21:31:00+08:00")
+        preview = datetime.fromisoformat(f"{day}T21:33:00+08:00")
+        first_check = datetime.fromisoformat(f"{day}T21:35:00+08:00")
+        second_check = datetime.fromisoformat(f"{day}T21:40:00+08:00")
+        notifications = []
+
+        def notifier(date, filename, _):
+            read_bound_report(Path(filename), home, cfg, "daily")
+            notifications.append(date)
+            return True
+
+        with patch("xiaomao.collect.utc_now", return_value=manual.astimezone(timezone.utc).isoformat()):
+            run_daily(cfg, date="2026-10-01", now=manual, notifier=notifier)
+            path, = run_daily(cfg, now=manual, notifier=notifier)
+            cfg.daily_time = "22:00"
+            save_config(cfg)
+            self.assertEqual(run_daily(cfg, now=preview, notifier=notifier), [path])
+            cfg.daily_time = "21:30"
+            save_config(cfg)
+            self.assertEqual(notifications, [])
+            with self.assertRaises(ValueError):
+                read_bound_report(path, home, cfg, "daily")
+
+            written = run_daily(cfg, scheduled=True, now=first_check, notifier=notifier,
+                                client_factory=lambda _: None)
+            self.assertEqual(written, [path], "21:35 应先重新生成被预览覆盖的晚报")
+            self.assertEqual(notifications, [day], "重新生成后，通知里的晚报应能打开")
+
+            run_daily(cfg, scheduled=True, now=second_check, notifier=notifier, client_factory=lambda _: None)
+            self.assertEqual(notifications, [day], "21:40 不应重复发送")
+
     def test_due_windows_are_fixed_and_catch_up_without_duplicates(self):
         from xiaomao.daily_jobs import due_dates, persist_window
         now = datetime(2026, 10, 3, 14, tzinfo=timezone.utc)
