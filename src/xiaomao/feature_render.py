@@ -299,7 +299,9 @@ def plain_next_steps(bundle):
         info = project.get("delivery_state") or {}
         name = project["display_name"]
         if info.get("unpushed") and info.get("has_remote"):
-            steps.append((0, f"{name}：推送本地的 {len(info['unpushed'])} 个提交", len(info["unpushed"])))
+            count = len(info["unpushed"])
+            minimum = "至少" if info.get("unpushed_incomplete") else ""
+            steps.append((0, f"{name}：推送本地的{minimum} {count} 个提交", count))
         if info.get("dirty_files"):
             advice = "，建议分批提交" if info["dirty_files"] >= 20 else "，记得提交"
             steps.append((1, f"{name}：{info['dirty_files']} 处未提交改动{advice}", info["dirty_files"]))
@@ -331,8 +333,9 @@ def _issue_count(bundle, notes):
     for project in bundle["projects"]:
         count += sum(any(m in g for m in FAILED_GAP_MARKERS) for g in project["gaps"])
         count += sum(any(m in item for m in FAILED_LIMITATION_MARKERS) for item in project["limitations"])
-        # A project whose worktrees are all gone is not a read failure.
-        count += sum(e != "no_live_tree" for e in (project.get("delivery_state") or {}).get("errors", []))
+        # Gone worktrees and bounded reads are kept in the evidence.
+        count += sum(e not in {"no_live_tree", "content_check_truncated"} and not e.startswith("unpushed_truncated:")
+                     for e in (project.get("delivery_state") or {}).get("errors", []))
         count += notes.get(project["repo_id"], {}).get("error") in MODEL_MISSING
     return count
 
@@ -340,14 +343,24 @@ def _issue_count(bundle, notes):
 def plain_summary_line(bundle):
     """First line of the plain report; also the notification headline."""
     active = sum(p["changed"] for p in bundle["projects"])
-    unpushed = [(p["display_name"], len((p.get("delivery_state") or {}).get("unpushed", [])))
-                for p in bundle["projects"]]
-    unpushed = [(name, n) for name, n in unpushed if n]
+    unpushed = []
+    for project in bundle["projects"]:
+        info = project.get("delivery_state") or {}
+        if info.get("unpushed"):
+            unpushed.append((project["display_name"], len(info["unpushed"]), info.get("unpushed_incomplete")))
     line = f"今天 {active} 个项目有进展" if active else "今天没有新的进展"
+    unread = [p["display_name"] for p in bundle["projects"] if not p["changed"] and not p.get("scan_succeeded", True)]
+    if unread:
+        target = unread[0] if len(unread) == 1 else f" {len(unread)} 个项目"
+        missing = f"没读到{target}的进度"
+        line = f"{line}，{missing}" if active else f"今天{missing}"
     if len(unpushed) == 1:
-        line += f"，{unpushed[0][0]} 有 {unpushed[0][1]} 个提交还没推送"
+        name, count, incomplete = unpushed[0]
+        minimum = "至少" if incomplete else ""
+        line += f"，{name} 有{minimum} {count} 个提交还没推送"
     elif unpushed:
-        line += f"，{len(unpushed)} 个项目共 {sum(n for _, n in unpushed)} 个提交还没推送"
+        minimum = "至少" if any(incomplete for _, _, incomplete in unpushed) else ""
+        line += f"，{len(unpushed)} 个项目共{minimum} {sum(n for _, n, _ in unpushed)} 个提交还没推送"
     return line + "。"
 
 
@@ -401,7 +414,8 @@ def render_plain_summary(bundle, notes, *, supplemented=False):
         lines.append("明天从这里继续")
         lines.extend(f"  {n}. {text}" for n, text in enumerate(steps[:3], 1))
         lines.append("")
-    quiet = [p["display_name"] for p in bundle["projects"] if not p["changed"]]
+    quiet = [p["display_name"] for p in bundle["projects"]
+             if not p["changed"] and p.get("scan_succeeded", True)]
     if quiet:
         lines.append("今天没动：" + "、".join(quiet))
     if issues := _issue_count(bundle, notes):

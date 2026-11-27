@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tests.helpers import git, init_repo, website_fixture_config
 from xiaomao.collect import scan_authorized
@@ -43,6 +44,28 @@ class DailyRegressionTests(unittest.TestCase):
         self.assertIn("已提交", body)
         self.assertNotIn("retry.py", body)
         self.assertNotIn("授权观察范围内无新变化", body)
+
+    def test_unpushed_branch_commit_is_reminded_after_switching_to_main(self):
+        from xiaomao.delivery_state import annotate_bundle
+        from xiaomao.feature_render import render_plain_summary
+
+        self.cfg.projects[0].display_name = "笔记"
+        git(self.repo, "remote", "add", "origin", "https://github.com/xoqiu09/fixture.git")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.scan("2026-10-01T13:00:00+00:00")
+        git(self.repo, "switch", "-c", "notes")
+        (self.repo / "notes.txt").write_text("读书笔记\n")
+        git(self.repo, "add", "notes.txt")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-10-02T02:00:00+00:00"}):
+            git(self.repo, "commit", "-m", "添加读书笔记")
+        git(self.repo, "branch", "notes-copy")
+        git(self.repo, "switch", "main")
+        self.scan("2026-10-02T03:00:00+00:00")
+
+        body = render_plain_summary(annotate_bundle(self.bundle()), {})
+        self.assertIn("添加读书笔记  🟠 仅本机", body)
+        self.assertIn("笔记 有 1 个提交还没推送", body)
+        self.assertIn("明天从这里继续\n  1. 笔记：推送本地的 1 个提交", body)
 
     def bundle(self, date="2026-10-02"):
         from datetime import datetime, timezone
@@ -102,12 +125,99 @@ class DailyRegressionTests(unittest.TestCase):
         self.assertEqual(len(project["trees"]), 2)
 
     def test_error_is_partial_coverage_not_no_work_claim(self):
+        from xiaomao.daily_jobs import notification_text
+        from xiaomao.feature_render import render_plain_summary
+
+        self.cfg.projects[0].display_name = "笔记"
         self.scan("2026-10-01T13:00:00+00:00")
-        self.repo.rename(self.root / "temporarily-missing")
-        self.scan("2026-10-02T03:00:00+00:00")
+        missing = self.repo.rename(self.root / "temporarily-missing")
+        self.assertEqual(self.scan("2026-10-02T03:00:00+00:00")["status"], "error")
         bundle = self.bundle()
         self.assertEqual(bundle["coverage"], "partial")
         self.assertTrue(bundle["projects"][0]["gaps"])
+        body = render_plain_summary(bundle, {})
+        with self.subTest(surface="晚报"):
+            self.assertEqual(body.splitlines()[1], "今天没读到笔记的进度。")
+            self.assertNotIn("今天没动：笔记", body)
+        with self.subTest(surface="通知"):
+            self.assertEqual(notification_text(bundle)[0], "今天没读到笔记的进度。")
+
+        missing.rename(self.repo)
+        self.assertIn(self.scan("2026-10-02T03:05:00+00:00")["status"], {"ok", "unchanged"})
+        recovered = self.bundle()
+        self.assertIn("今天没动：笔记", render_plain_summary(recovered, {}))
+        self.assertEqual(notification_text(recovered)[0], "今天没有新的进展。")
+
+    def test_daily_evidence_failure_does_not_claim_no_work(self):
+        from xiaomao.daily_jobs import notification_text
+        from xiaomao.feature_render import render_plain_summary
+
+        self.cfg.projects[0].display_name = "笔记"
+        self.scan("2026-10-01T13:00:00+00:00")
+        with (patch("xiaomao.activity.record_snapshot", side_effect=OSError("read failed")),
+              patch("xiaomao.store.utc_now", return_value="2026-10-02T03:00:00+00:00")):
+            self.assertEqual(self.scan("2026-10-02T03:00:00+00:00")["status"], "unchanged")
+        failed = self.bundle()
+        self.assertIn("website-main: 日报证据采集失败", failed["projects"][0]["gaps"])
+        with self.subTest(surface="晚报"):
+            body = render_plain_summary(failed, {})
+            self.assertEqual(body.splitlines()[1], "今天没读到笔记的进度。")
+            self.assertNotIn("今天没动：笔记", body)
+        with self.subTest(surface="通知"):
+            self.assertEqual(notification_text(failed)[0], "今天没读到笔记的进度。")
+
+        check = self.conn.execute("SELECT check_id,results_json FROM daily_checks ORDER BY rowid DESC LIMIT 1").fetchone()
+        old_results = json.loads(check["results_json"])
+        del old_results[0]["daily_evidence_ok"]
+        self.conn.execute("UPDATE daily_checks SET results_json=? WHERE check_id=?",
+                          (json.dumps(old_results), check["check_id"]))
+        self.assertEqual(notification_text(self.bundle())[0], "今天没读到笔记的进度。")
+
+        self.assertEqual(self.scan("2026-10-02T03:05:00+00:00")["status"], "unchanged")
+        self.scan("2026-10-02T14:00:00+00:00")
+        recovered = self.bundle()
+        self.assertIn("今天没动：笔记", render_plain_summary(recovered, {}))
+        self.assertEqual(notification_text(recovered)[0], "今天没有新的进展。")
+
+    def test_late_scan_counts_the_commit_without_claiming_unread_progress(self):
+        from xiaomao.daily_jobs import notification_text
+        from xiaomao.feature_render import render_plain_summary
+
+        self.cfg.projects[0].display_name = "笔记"
+        self.scan("2026-10-01T13:00:00+00:00")
+        (self.repo / "notes.txt").write_text("读书笔记\n")
+        git(self.repo, "add", "notes.txt")
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": "2026-10-02T03:00:00+00:00"}):
+            git(self.repo, "commit", "-m", "整理读书笔记")
+        today = "2026-10-02"
+        self.assertEqual(notification_text(self.bundle(today))[0], "今天没读到笔记的进度。")
+        self.scan("2026-10-02T14:00:00+00:00")
+
+        regenerated = self.bundle(today)
+        body = render_plain_summary(regenerated, {})
+        self.assertIn("整理读书笔记", body)
+        self.assertTrue(any("采集缺口" in gap for gap in regenerated["projects"][0]["gaps"]))
+        with self.subTest(surface="晚报"):
+            self.assertEqual(body.splitlines()[1], "今天 1 个项目有进展。")
+        with self.subTest(surface="通知"):
+            self.assertEqual(notification_text(regenerated)[0], "今天 1 个项目有进展。")
+
+    def test_many_unread_projects_leave_room_for_push_reminder_in_notification(self):
+        from xiaomao.daily_jobs import macos_notification, notification_text
+
+        bundle = {"projects": [
+            {"display_name": f"没有读到进度的个人项目编号{i:02d}", "scan_succeeded": False, "changed": False}
+            for i in range(12)
+        ] + [{"display_name": "笔记", "changed": True,
+              "delivery_state": {"has_remote": True, "unpushed": ["abc"]}}]}
+        message = notification_text(bundle)
+        with patch("xiaomao.daily_jobs.subprocess.run", return_value=Mock(returncode=0)) as run:
+            self.assertTrue(macos_notification("2026-10-02", "", message))
+        subtitle = run.call_args.args[0][-2]
+        with self.subTest(part="读取失败"):
+            self.assertIn("没读到 12 个项目的进度", subtitle)
+        with self.subTest(part="推送提醒"):
+            self.assertIn("笔记 有 1 个提交还没推送", subtitle)
 
     def test_never_observed_failed_tree_remains_in_coverage_inventory(self):
         self.repo.rename(self.root / "missing")

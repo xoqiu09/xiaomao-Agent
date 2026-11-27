@@ -78,13 +78,21 @@ def _group(project, repo_id):
         "project_id": project.project_id, "display_name": project.display_name,
         "aliases": [project.project_id], "repo_id": repo_id, "trees": [],
         "commits": [], "activity": [], "ongoing": [], "gaps": [], "limitations": [],
-        "evidence_ids": [], "changed": False,
+        "evidence_ids": [], "changed": False, "scan_succeeded": False,
         "feature_contexts": {},
     }
 
 
-def _coverage(conn, key, start, end, now, group):
+def _coverage(conn, project_id, key, start, end, now, group, written_trees):
     horizon = min(end, now).isoformat()
+    failed_trees = set()
+    for error in conn.execute("SELECT at_utc,payload_json FROM events WHERE kind='daily_evidence_error' "
+                              "AND project_id=? AND at_utc>=? AND at_utc<?",
+                              (project_id, start.isoformat(), end.isoformat())):
+        tree_id = json.loads(error["payload_json"]).get("worktree_id")
+        group["gaps"].append(f"{tree_id}: 日报证据采集失败")
+        if error["at_utc"] < horizon:
+            failed_trees.add(tree_id)
     checks = list(conn.execute(
         "SELECT * FROM daily_checks WHERE scope_key=? AND at_utc<? ORDER BY at_utc,rowid",
         (key, horizon),
@@ -104,8 +112,18 @@ def _coverage(conn, key, start, end, now, group):
             group["gaps"].append(f"采集缺口：{a.isoformat()} → {b.isoformat()}")
     for row in within:
         for result in json.loads(row["results_json"]):
-            if result.get("status") not in {"ok", "unchanged", "gone"}:
-                group["gaps"].append(f"{result.get('worktree_id') or 'project'}: 采集 {result.get('status')}")
+            status = result.get("status")
+            if status in {"ok", "unchanged"}:
+                tree_id = result.get("worktree_id")
+                # Older checks recorded only Git status. If that tree logged a daily
+                # read failure, require a stored observation in this window.
+                succeeded = result.get("daily_evidence_ok")
+                if succeeded is None:
+                    succeeded = tree_id not in failed_trees or tree_id in written_trees
+                if succeeded:
+                    group["scan_succeeded"] = True
+            elif status != "gone":
+                group["gaps"].append(f"{result.get('worktree_id') or 'project'}: 采集 {status}")
     for row in selected:
         for result in json.loads(row["results_json"]):
             if result.get("status") in {"ok", "unchanged", "gone"}:
@@ -118,6 +136,7 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
     cfg = effective_config(cfg)
     now = now or datetime.now(timezone.utc)
     start, end = report_window(cfg, date)
+    window_start, horizon = start.isoformat(), min(end, now).isoformat()
     groups = {}
     for project in cfg.projects:
         if project_exclusion_reason(project):
@@ -130,6 +149,7 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             group["aliases"].append(project.project_id)
         explicit = {w.worktree_id: w for w in project.worktrees}
         eligible_trees = []
+        written_trees = set()
         for tree in trees:
             if tree["repo_id"] != repo_id:
                 group["gaps"].append(f"{tree['tree_id']}: 登记项目包含不同仓库，需分别登记")
@@ -160,6 +180,8 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
             previous = None
             for row in samples:
                 state = json.loads(row["state_json"])
+                if window_start <= row["at_utc"] < horizon and state.get("status") == "ok" and not state.get("gone"):
+                    written_trees.add(tree["tree_id"])
                 context = state.get("feature_context")
                 if context:
                     group["feature_contexts"][context["version"]] = context
@@ -169,6 +191,8 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
                         group["activity"].append(event)
                 previous = state
             state = previous
+            if window_start <= tree["last_seen"] < horizon and state.get("status") == "ok" and not state.get("gone"):
+                written_trees.add(tree["tree_id"])
             group["limitations"].extend(state.get("limitations", []))
             group["trees"].append({
                 "tree_id": tree["tree_id"], "path": tree["path"], "branch": state.get("branch"),
@@ -214,12 +238,7 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
                     "branch": None, "head": None, "gone": False,
                     "last_seen": None, "status": "unobserved",
                 })
-        _coverage(conn, key, start, end, now, group)
-        for error in conn.execute("SELECT payload_json FROM events WHERE kind='daily_evidence_error' "
-                                  "AND project_id=? AND at_utc>=? AND at_utc<?",
-                                  (project.project_id, start.isoformat(), end.isoformat())):
-            payload = json.loads(error[0])
-            group["gaps"].append(f"{payload.get('worktree_id')}: 日报证据采集失败")
+        _coverage(conn, project.project_id, key, start, end, now, group, written_trees)
     for group in groups.values():
         group["commits"].sort(key=lambda c: (c["effective_at"], c["sha"]))
         group["activity"].sort(key=_event_order)
@@ -297,9 +316,10 @@ def delivery_lines(info: dict) -> list[str]:
     remote = {True: "有", False: "无（只判定未提交 / 仅本机）", None: "未能读取"}[info["has_remote"]]
     basis = {"remote_head": "origin/HEAD", "conventional_name": "按常用名推定，未记录 origin/HEAD",
              None: "未确定，不判定已合并"}[info["default_basis"]]
+    minimum = "至少 " if info.get("unpushed_incomplete") else ""
     lines = [f"  代码位置（生成时）：远端 {remote} · 默认分支 {info['default_ref'] or '—'}（依据：{basis}）",
              "    依据为本机 refs/remotes，不 fetch；其他机器推送后本机未同步的提交可能仍显示为仅本机。",
-             f"    未推送提交 {len(info['unpushed'])} 个 · 未提交文件 {info['dirty_files']} 个"]
+             f"    未推送提交 {minimum}{len(info['unpushed'])} 个 · 未提交文件 {info['dirty_files']} 个"]
     content = set(info.get("merged_by_content", []))
     for sha, state in info["commits"].items():
         basis = "（改动内容已在默认分支：rebase 或压缩合并）" if sha in content else ""
@@ -311,6 +331,9 @@ def delivery_lines(info: dict) -> list[str]:
         from xiaomao.delivery_state import STALE_LOCAL_DAYS
         lines.append(f"    超过 {STALE_LOCAL_DAYS} 天的未推送提交 {len(stale)} 个（不进入正文提醒）："
                      + "、".join(s[:12] for s in stale[:10]))
+    if unchecked := info.get("unpushed_unchecked"):
+        lines.append(f"    尚未核对是否按内容合并的提交 {len(unchecked)} 个："
+                     + "、".join(s[:12] for s in unchecked))
     lines.extend(f"    读取问题：{e}" for e in info["errors"])
     return lines
 

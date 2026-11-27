@@ -148,7 +148,7 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
 
 def record_checks(conn, project, results: list[dict], at: str) -> None:
     at, key = stamp(at), scope_key(project)
-    compact = [{k: row.get(k) for k in ("worktree_id", "status", "observation_id", "error", "reason")}
+    compact = [{k: row.get(k) for k in ("worktree_id", "status", "observation_id", "error", "reason", "daily_evidence_ok")}
                for row in results]
     conn.execute("INSERT INTO daily_checks VALUES (?,?,?,?,?)",
                  ("dc_" + uuid.uuid4().hex, project.project_id, key, at, json.dumps(compact)))
