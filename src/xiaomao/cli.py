@@ -12,7 +12,7 @@ from xiaomao import __version__
 from xiaomao.config import VolumeIdentityError, load_config, save_config
 from xiaomao.collect import register_project, scan_authorized
 from xiaomao.doctor import collect_doctor, format_doctor
-from xiaomao.paths import default_home, ensure_layout, layout
+from xiaomao.paths import default_home, ensure_layout, formal_home, layout
 from xiaomao.render import default_report_path, status_text, write_project_report, authorized_rows
 from xiaomao.scope import project_exclusion_reason
 from xiaomao.lock import ScanLock
@@ -36,7 +36,7 @@ def _home_from_args(ns: argparse.Namespace) -> Path:
 
 def _is_formal_home(home: Path) -> bool:
     try:
-        return home.resolve() == default_home().resolve()
+        return home.samefile(formal_home())
     except OSError:
         return False
 
@@ -464,13 +464,14 @@ def cmd_pause(ns: argparse.Namespace) -> int:
             sys.stdout.write("推理已暂停（不加载模型；扫描仍可运行）\n")
         else:
             pause_scan_flag(conn)
-            extra = ""
             if _is_formal_home(home):
                 info = pause_agents()
                 extra = (
                     f" launchctl bootout scan={info.get('scan_bootout')} "
                     f"daily={info.get('daily_bootout')}"
                 )
+            else:
+                extra = "仅修改当前数据目录的扫描状态。"
             sys.stdout.write(f"扫描已暂停（scan_paused=1）。{extra}\n")
     return 0
 
@@ -487,13 +488,14 @@ def cmd_resume(ns: argparse.Namespace) -> int:
             sys.stdout.write("推理已恢复\n")
         else:
             resume_scan_flag(conn)
-            extra = ""
             if _is_formal_home(home):
                 info = resume_agents()
                 extra = (
                     f" launchctl bootstrap scan={info.get('scan_bootstrap')} "
                     f"daily={info.get('daily_bootstrap')}"
                 )
+            else:
+                extra = "仅修改当前数据目录的扫描状态。"
             sys.stdout.write(f"扫描已恢复（scan_paused=0）。{extra}\n")
     return 0
 
