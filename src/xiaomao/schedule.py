@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +28,16 @@ def default_plist_path() -> Path:
 
 
 def python_executable() -> str:
-    return os.environ.get("XIAOMAO_PYTHON") or "/Users/xiuqiu/.local/bin/python3.11"
+    configured = os.environ.get("XIAOMAO_PYTHON")
+    if not configured:
+        return sys.executable
+    if "/" not in configured:
+        found = shutil.which(configured)
+        if found is None:
+            raise FileNotFoundError(f"XIAOMAO_PYTHON executable not found on PATH: {configured!r}")
+        configured = found
+    # Keep the executable's symlink so virtual environments keep their identity.
+    return str(Path(configured).absolute())
 
 
 def repo_root() -> Path:
@@ -64,6 +75,7 @@ def plist_payload(*, home: Path, log_dir: Path, project: str = "website") -> dic
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/Users/xiuqiu/.local/bin:/opt/homebrew/bin",
             "PYTHONPATH": str(repo_root() / "src"),
             "XIAOMAO_HOME": str(home),
+            "XIAOMAO_PYTHON": python_executable(),
         },
     }
 
@@ -119,6 +131,7 @@ def daily_plist_payload(*, home: Path, log_dir: Path, project: str = "website",
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/Users/xiuqiu/.local/bin:/opt/homebrew/bin",
             "PYTHONPATH": str(repo_root() / "src"),
             "XIAOMAO_HOME": str(home),
+            "XIAOMAO_PYTHON": python_executable(),
         },
     }
 
