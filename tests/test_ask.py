@@ -140,6 +140,17 @@ class AskTests(unittest.TestCase):
         self.assertIn("没有注明依据", err)
         self.assertIsNone(validated({"json": {"answer": "", "sources": [], "not_in_records": True}}, {"2026-10-02"}))
 
+    def test_answer_with_any_missing_cited_day_is_not_shown(self):
+        code, out, err, _ = self.ask(reply={
+            "kind": "project",
+            "answer": "2 日加了空结果提示，3 日已发布。",
+            "sources": ["2026-10-02", "2026-10-03"],
+            "not_in_records": False,
+            "handoff_question": "",
+        })
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("没有注明依据", err)
+
     def test_not_in_records_ignores_the_models_claim(self):
         for sources in ([], ["2026-10-02"]):
             with self.subTest(sources=sources):
