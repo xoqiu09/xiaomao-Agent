@@ -6,20 +6,22 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from xiaomao.briefing import (
+    cache_paths,
     coerce_understanding,
     extra_for_summarize,
     ingest_project,
     load_cached_understanding,
     load_source,
     split_chunks,
+    write_cache,
 )
 from xiaomao.cli import main
 from xiaomao.config import ProjectSpec, WorktreeSpec, load_config, save_config
 from xiaomao.paths import ensure_layout
-from xiaomao.policy import redact_secret_spans
+from xiaomao.policy import redact_secret_spans, sha256_bytes
 from tests.helpers import init_repo, website_fixture_config
 
 
@@ -211,8 +213,6 @@ class BriefingTests(unittest.TestCase):
 
     def test_legacy_digest_is_rebound_only_after_explicit_ingest(self):
         from xiaomao.ask import project_briefs
-        from xiaomao.briefing import cache_paths
-        from xiaomao.policy import sha256_bytes
         _root, home = self._home()
         cfg = load_config(home)
         self.assertEqual(ingest_project(cfg, "website", client=FakeClient())["status"], "ok")
@@ -226,6 +226,81 @@ class BriefingTests(unittest.TestCase):
         self.assertIsNotNone(load_cached_understanding(cfg, "website"))
         self.assertEqual(ingest_project(cfg, "website")["status"], "unchanged")
         self.assertEqual(project_briefs(cfg, "website")[0]["purpose"], body["understanding"]["purpose"])
+
+    def test_failed_chunk_preserves_complete_cache_and_is_retried(self) -> None:
+        limit = "只能读取已登记的个人项目"
+        for error in ("TimeoutError", "invalid_json"):
+            with self.subTest(error=error):
+                _root, home = self._home()
+                cfg = load_config(home)
+                self.assertEqual(ingest_project(cfg, "website", client=FakeClient())["status"], "ok")
+                paths = cache_paths(cfg, "website")
+                previous = [path.read_bytes() for path in paths]
+                doc = Path(cfg.briefing_docs_root) / "website" / "00-项目说明.md"
+                doc.write_text(
+                    f"用途：记录个人项目。\n## 核心功能审查表\n| 限制 |\n| --- |\n| {limit} |\n",
+                    encoding="utf-8",
+                )
+
+                retry = False
+
+                def generate(*, user, **_kwargs):
+                    if limit not in user.partition("本块正文：\n")[2]:
+                        return {"json": {"purpose": "记录个人项目"}}
+                    if retry:
+                        return {"json": {"invariants": [limit]}}
+                    if error == "TimeoutError":
+                        raise TimeoutError()
+                    return {"json": {}}
+
+                client = Mock()
+                client.generate_json.side_effect = generate
+                first = ingest_project(cfg, "website", client=client)
+                self.assertEqual(client.generate_json.call_count, 2)
+                kept_previous = [path.read_bytes() for path in paths] == previous
+
+                retry = True
+                client.reset_mock()
+                second = ingest_project(cfg, "website", client=client)
+                cached = load_cached_understanding(cfg, "website")
+                self.assertIsNotNone(cached)
+                self.assertEqual(
+                    (first["status"], kept_previous, second["status"], client.generate_json.call_count,
+                     limit in cached["understanding"]["invariants"]),
+                    ("degraded", True, "ok", 2, True),
+                )
+                self.assertEqual(first["errors"], [f"chunk_1:{error}"])
+                self.assertIsNone(first["path"])
+
+    def test_cli_ingest_retries_an_old_multichunk_cache_once(self) -> None:
+        _root, home = self._home()
+        cfg = load_config(home)
+        source, status = load_source(cfg, "website")
+        self.assertEqual(status, "ok")
+        self.assertIsNotNone(source)
+        chunk_count = len(split_chunks(source.text))
+        self.assertGreater(chunk_count, 1)
+        write_cache(cfg, source, {"purpose": "只读工程观察员"}, model="old", chunk_count=chunk_count)
+        body_path, meta_path = cache_paths(cfg, "website")
+        body, meta = json.loads(body_path.read_bytes()), json.loads(meta_path.read_bytes())
+        body.pop("all_chunks_processed", None)
+        body_path.write_text(json.dumps(body), encoding="utf-8")
+        meta["body_sha256"] = sha256_bytes(body_path.read_bytes())
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        self.assertEqual(load_cached_understanding(cfg, "website")["understanding"]["invariants"], [])
+
+        argv = ["--home", str(home), "ingest-briefing", "--project", "website"]
+        client = FakeClient()
+        statuses = []
+        with patch("xiaomao.cli._briefing_client", return_value=client) as factory:
+            for _ in range(2):
+                with redirect_stdout(io.StringIO()) as stdout:
+                    self.assertEqual(main(argv), 0)
+                statuses.append(json.loads(stdout.getvalue())["results"][0]["status"])
+        self.assertEqual((statuses, len(client.calls)), (["ok", "unchanged"], chunk_count))
+        factory.assert_called_once()
+        cached = load_cached_understanding(cfg, "website")
+        self.assertEqual(cached["understanding"]["invariants"], ["静态审查不等于当前运行通过"])
 
     def test_scan_does_not_ingest(self) -> None:
         _root, home = self._home()

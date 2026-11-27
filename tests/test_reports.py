@@ -11,12 +11,12 @@ import tempfile
 import unittest
 from contextlib import chdir, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from xiaomao import schedule
 from xiaomao.cli import main
 from xiaomao.config import default_config, save_config
-from xiaomao.eval_runner import host_pressure, self_check_validators
+from xiaomao.eval_runner import host_pressure, run_eval, self_check_validators
 from xiaomao.eval_samples import samples
 from xiaomao.lock import ScanLock
 from xiaomao.migrate import backup_sqlite, migrate_models_dir
@@ -206,6 +206,33 @@ class SummarizeTests(unittest.TestCase):
             "prompt_injection",
         ):
             self.assertIn(needed, cats)
+
+    def test_eval_counts_sample_specific_forbidden_claims(self) -> None:
+        cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        selected = {sample.sample_id: sample for sample in samples()}
+        cases = (
+            ("truncated-diff", "完整实现了 HandleSession", [], (1, 0)),
+            ("truncated-diff", "完整实现了 HandleSession", [{"text": "测试未知"}], (1, 0)),
+            ("truncated-diff", "不能说完整实现了 HandleSession", [], (0, 1)),
+            ("truncated-diff", "完整实现了 HandleSession，但测试未知。", [], (1, 0)),
+            ("truncated-diff", "尚无证据表明完整实现了 HandleSession。", [], (0, 1)),
+            ("truncated-diff", "完整实现了 HandleSession 这一说法缺乏证据。", [], (0, 1)),
+            ("truncated-diff", "不能说完整实现了 HandleSession但后来确认完整实现了 HandleSession。", [], (1, 0)),
+            ("git-diff-conflict-markers-absent", "冲突未解决", [], (1, 0)),
+        )
+        client = Mock()
+        for sample_id, text, unknowns, expected in cases:
+            with self.subTest(sample_id=sample_id, text=text, unknowns=unknowns):
+                sample = selected[sample_id]
+                client.generate_json.return_value = {"json": {
+                    "interpretations": [{"text": text, "evidence_ids": sample.facts["evidence_ids"]}],
+                    "suggestions": [],
+                    "unknowns": unknowns,
+                }}
+                with patch("xiaomao.eval_runner.host_pressure", return_value={}):
+                    report = run_eval(cfg, client=client, model=cfg.ask_model, selected=[sample])
+                self.assertEqual((report["serious_factual_errors"], report["usable"]), expected)
+                self.assertEqual(report["samples"][0]["forbidden_hits"], list(sample.must_not) if expected[0] else [])
 
     def test_extract_json_object_from_think_and_fences(self) -> None:
         from xiaomao.ollama_runtime import extract_json_object

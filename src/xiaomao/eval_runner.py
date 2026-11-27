@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from typing import Any
 
 from xiaomao.config import AppConfig
 from xiaomao.eval_samples import Sample, samples
-from xiaomao.summarize import _is_assertive_completion, summarize_or_degrade, validate_model_json
+from xiaomao.summarize import _NEGATION_MARKERS, summarize_or_degrade, validate_model_json
 
 
 def host_pressure() -> dict[str, Any]:
@@ -71,24 +72,41 @@ def host_pressure() -> dict[str, Any]:
     return out
 
 
-def _contains_any(text: str, needles: tuple[str, ...]) -> list[str]:
-    hits = []
-    for n in needles:
-        if n and n in text:
-            hits.append(n)
-    return hits
+_CLAIM_NEGATION_PREFIX = re.compile(
+    "(?:" + "|".join(re.escape(marker) for marker in _NEGATION_MARKERS if marker not in {"未知", "unknown"})
+    + r"|尚无|暂无|缺乏|无证据|不足以)"
+    r"(?:\s*(?:证据|足够|表明|显示|证明|说明|确认|断定|判断|推断|能|说))*"
+    r'\s*[:：]?\s*(?:\\?["“‘「『]\s*)?$',
+    re.IGNORECASE,
+)
+_CLAIM_NEGATION_SUFFIX = re.compile(
+    r'\s*(?:\\?["”’」』]\s*)?(?:(?:这一|的)?(?:说法|结论|断言))'
+    r"\s*(?:没有|缺乏|仍无|尚无|无)(?:足够)?证据"
+)
+
+
+def _is_asserted(statement: str, needle: str) -> bool:
+    for match in re.finditer(re.escape(needle), statement):
+        if _CLAIM_NEGATION_PREFIX.search(statement[:match.start()]):
+            continue
+        if _CLAIM_NEGATION_SUFFIX.match(statement[match.end():]):
+            continue
+        return True
+    return False
 
 
 def _assertive_hits(text: str, needles: tuple[str, ...]) -> list[str]:
     if not needles or not text:
         return []
-    if not _is_assertive_completion(text):
-        return []
-    return [n for n in needles if n and n in text]
+    statements = re.split(r"[。！？；!?;\n]+", text)
+    return [
+        needle for needle in needles
+        if needle and any(_is_asserted(statement, needle) for statement in statements)
+    ]
 
 
 def score_sample(sample: Sample, result: dict[str, Any]) -> dict[str, Any]:
-    blob = json.dumps(result.get("payload") or result.get("raw") or {}, ensure_ascii=False)
+    blob = json.dumps(result.get("payload") or result.get("raw") or {}, ensure_ascii=False, indent=2)
     note = result.get("model_note") or ""
     combined = blob + "\n" + note
     forbidden = _assertive_hits(combined, sample.must_not)

@@ -257,7 +257,13 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
     packet, labels = material(cfg, records, ns.project)
     started = None
     if client_factory is None:
-        client, started = _local_client(cfg)
+        from xiaomao.ollama_runtime import ModelHostError
+
+        try:
+            client, started = _local_client(cfg)
+        except ModelHostError as exc:
+            err.write(f"{exc}\n")
+            return 3
         if client is None:
             err.write("本地模型没有运行，也没能从外盘启动。可以先运行 scripts/user_serve_ollama.sh。\n")
             return 3
@@ -277,12 +283,14 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
 
 def _local_client(cfg):
     """A client for the running Ollama, or one started just for this question."""
-    from xiaomao.ollama_runtime import OllamaClient, inspect_running, models_dir_allowed, start_serve
+    from xiaomao.ollama_runtime import ModelHostError, OllamaClient, inspect_running, models_dir_allowed, start_serve
     try:
         models_dir_allowed(cfg)
         if inspect_running(cfg)["reachable"]:
             return OllamaClient(cfg), None
         started = start_serve(cfg)
+    except ModelHostError:
+        raise
     except Exception:
         return None, None
     return (OllamaClient(cfg), started) if started is not None else (None, None)
