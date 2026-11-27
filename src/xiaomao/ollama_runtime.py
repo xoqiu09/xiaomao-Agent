@@ -6,6 +6,7 @@ volume → refuse. Never fall back to ~/.ollama/models.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import socket
@@ -23,7 +24,19 @@ DEFAULT_KEEP_ALIVE = "0"
 FORBIDDEN_FALLBACK = Path.home() / ".ollama" / "models"
 
 
+class _NoOllamaRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoOllamaRedirect())
+
+
 class ModelPathError(RuntimeError):
+    pass
+
+
+class ModelHostError(ValueError):
     pass
 
 
@@ -68,21 +81,33 @@ def ollama_bin() -> str | None:
 
 
 def parse_host(host: str) -> tuple[str, int]:
-    if ":" in host:
-        name, port_s = host.rsplit(":", 1)
-        return name, int(port_s)
-    return host, 11434
+    if not isinstance(host, str):
+        raise ValueError("invalid Ollama host")
+    if host.startswith("["):
+        name, bracket, suffix = host[1:].partition("]")
+        if not bracket or ":" not in name or (suffix and not suffix.startswith(":")):
+            raise ValueError("invalid bracketed Ollama host")
+        return name, int(suffix[1:]) if suffix else 11434
+    name, colon, port = host.rpartition(":")
+    # Keep accepting the existing ::1:port form alongside bracketed IPv6.
+    if ":" in name and name != "::1":
+        return host, 11434
+    return (name, int(port)) if colon else (host, 11434)
 
 
 def _url(cfg: AppConfig, path: str) -> str:
+    if not bind_is_loopback(cfg):
+        raise ModelHostError("Ollama 地址必须指向本机，请检查配置里的 ollama_host。")
     name, port = parse_host(cfg.ollama_host)
+    if ":" in name:
+        name = "[::1]"
     return f"http://{name}:{port}{path}"
 
 
 def api_get(cfg: AppConfig, path: str, timeout: float = 2.0) -> dict[str, Any] | None:
     req = urllib.request.Request(_url(cfg, path), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _LOCAL_OPENER.open(req, timeout=timeout) as resp:
             body = resp.read()
     except (urllib.error.URLError, TimeoutError, OSError):
         return None
@@ -100,7 +125,7 @@ def api_post(cfg: AppConfig, path: str, payload: dict[str, Any], timeout: float 
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _LOCAL_OPENER.open(req, timeout=timeout) as resp:
         body = resp.read()
     return json.loads(body.decode("utf-8"))
 
@@ -149,13 +174,11 @@ def inspect_running(cfg: AppConfig) -> dict[str, Any]:
     pids = running_ollama_pids()
     envs = [process_environ(pid) for pid in pids]
     tags = api_get(cfg, "/api/tags")
-    name, port = parse_host(cfg.ollama_host)
-    listening_loopback = name in {"127.0.0.1", "localhost", "::1"}
     return {
         "pids": pids,
         "process_env": envs,
         "host": cfg.ollama_host,
-        "listening_loopback": listening_loopback,
+        "listening_loopback": bind_is_loopback(cfg),
         "reachable": tags is not None,
         "tags": tags,
         "configured": {
@@ -349,18 +372,22 @@ def start_serve(cfg: AppConfig, *, wait_s: float = 30.0) -> subprocess.Popen | N
 
 
 def bind_is_loopback(cfg: AppConfig) -> bool:
-    name, _ = parse_host(cfg.ollama_host)
-    if name not in {"127.0.0.1", "localhost", "::1"}:
+    try:
+        name, port = parse_host(cfg.ollama_host)
+    except (TypeError, ValueError):
         return False
+    if not 1 <= port <= 65535:
+        return False
+    if name != "localhost":
+        try:
+            return "%" not in name and ipaddress.ip_address(name).is_loopback
+        except ValueError:
+            return False
     try:
         info = socket.getaddrinfo(name, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.gaierror:
         return False
-    for item in info:
-        ip = item[4][0]
-        if ip not in {"127.0.0.1", "::1"}:
-            return False
-    return True
+    return bool(info) and all(ipaddress.ip_address(item[4][0]).is_loopback for item in info)
 
 
 def legacy_models_present() -> bool:

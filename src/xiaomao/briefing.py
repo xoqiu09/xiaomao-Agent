@@ -527,6 +527,7 @@ def write_cache(
         "model": model,
         "generated_at": utc_now(),
         "chunk_count": chunk_count,
+        "all_chunks_processed": True,
         "understanding": coerce_understanding(understanding),
     }
     body = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -600,6 +601,16 @@ def load_cached_understanding(cfg: AppConfig, project_id: str) -> dict[str, Any]
     return payload
 
 
+def _cache_for_ingest(cfg: AppConfig, source: BriefingSource) -> dict[str, Any] | None:
+    cached = load_cached_understanding(cfg, source.project_id)
+    if cached is None or cached.get("source_sha256") != source.sha256:
+        return None
+    # Old multi-chunk digests could be saved even after a chunk failed.
+    if int(cached.get("chunk_count") or 0) > 1 and cached.get("all_chunks_processed") is not True:
+        return None
+    return cached
+
+
 def extra_for_summarize(cfg: AppConfig, project_id: str | None = None) -> str:
     ids = [project_id] if project_id else eligible_briefing_projects(cfg)
     items: list[dict[str, Any]] = []
@@ -654,7 +665,7 @@ def extract_chunk(
         schema=UNDERSTANDING_SCHEMA,
     )
     payload = raw.get("json") if isinstance(raw, dict) else None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not payload:
         return None
     return coerce_understanding(payload)
 
@@ -678,8 +689,8 @@ def ingest_project(
     }
     if source is None:
         return result
-    cached = load_cached_understanding(cfg, project_id)
-    if cached is not None and cached.get("source_sha256") == source.sha256:
+    cached = _cache_for_ingest(cfg, source)
+    if cached is not None:
         if "scope_sha256" not in cached:
             # Explicit ingest verified the source bytes; bind old caches without another inference.
             write_cache(cfg, source, cached["understanding"], model=cached.get("model") or "unknown",
@@ -722,14 +733,13 @@ def ingest_project(
             except Exception:
                 pass
     problems = validate_understanding(understanding, require_purpose=True)
-    if problems:
+    if errors or problems:
         result["status"] = "degraded"
         result["errors"] = errors + problems
         return result
     path = write_cache(cfg, source, understanding, model=tag, chunk_count=len(chunks))
     result["status"] = "ok"
     result["path"] = str(path)
-    result["errors"] = errors
     return result
 
 
@@ -749,13 +759,8 @@ def ingest_authorized(
     results: list[dict[str, Any]] = []
     for pid in ids:
         if active is None and client_factory is not None:
-            source, status = load_source(cfg, pid)
-            cached = load_cached_understanding(cfg, pid) if status == "ok" else None
-            needs_model = (
-                source is not None
-                and (cached is None or cached.get("source_sha256") != source.sha256)
-            )
-            if needs_model:
+            source, _ = load_source(cfg, pid)
+            if source is not None and _cache_for_ingest(cfg, source) is None:
                 active = client_factory()
         results.append(ingest_project(cfg, pid, client=active, model=model))
     return results

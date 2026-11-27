@@ -7,8 +7,10 @@ import json
 import tempfile
 import unittest
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 from tests.plain_scenario import NOW, build, make_day
 from xiaomao.ask import ask_command, build_packet, recent_bundles, validated
@@ -184,6 +186,82 @@ class AskTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("推理已暂停", err_text)
         self.assertEqual(client.calls, [])
+
+    def test_nonlocal_ollama_is_rejected_before_lookup_or_prompt(self):
+        save_config(replace(self.cfg, ollama_host="model.example.invalid:11434"))
+        ns = Namespace(question="笔记工具做了什么", days=7, project=None, model=None)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with (
+                patch("xiaomao.ollama_runtime.models_dir_allowed"),
+                patch("xiaomao.ollama_runtime.running_ollama_pids", return_value=[]),
+                patch("xiaomao.ollama_runtime.start_serve") as start,
+                patch("socket.create_connection", side_effect=OSError("offline")) as connect,
+            ):
+                code = ask_command(ns, self.home, today="2026-10-03", out=out, err=err)
+                self.assertEqual(code, 3)
+                connect.assert_not_called()
+                start.assert_not_called()
+        finally:
+            save_config(self.cfg)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("Ollama 地址必须指向本机", err.getvalue())
+
+    def test_shared_ollama_client_rejects_nonlocal_prompt(self):
+        from xiaomao.ollama_runtime import OllamaClient
+
+        client = OllamaClient(replace(self.cfg, ollama_host="model.example.invalid:11434"))
+        with (
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("socket.create_connection", side_effect=OSError("offline")) as connect,
+        ):
+            with self.assertRaisesRegex(ValueError, "Ollama 地址必须指向本机"):
+                client.generate_json(model=self.cfg.ask_model, system="", user="虚构项目资料", schema={})
+            connect.assert_not_called()
+
+    def test_ollama_requests_connect_directly_even_with_proxy(self):
+        from xiaomao.ollama_runtime import api_get, api_post
+
+        connection = Mock()
+        connection.makefile.side_effect = lambda *args: io.BytesIO(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        for configured, host, port in (
+            ("127.0.0.1:11434", "127.0.0.1", 11434),
+            ("127.0.0.2:11434", "127.0.0.2", 11434),
+            ("[::1]:11434", "::1", 11434),
+            ("::1:11435", "::1", 11435),
+            ("[0:0:0:0:0:0:0:1]:11434", "::1", 11434),
+        ):
+            with (
+                self.subTest(configured=configured),
+                patch("urllib.request._opener", None),
+                patch("urllib.request.getproxies", return_value={"http": "http://proxy.example.invalid:8123"}),
+                patch("urllib.request.proxy_bypass", return_value=False),
+                patch("socket.create_connection", return_value=connection) as connect,
+            ):
+                cfg = replace(self.cfg, ollama_host=configured)
+                self.assertEqual(api_get(cfg, "/api/tags"), {})
+                self.assertEqual(api_post(cfg, "/api/chat", {"message": "虚构项目资料"}), {})
+                self.assertEqual([call.args[0] for call in connect.call_args_list], [(host, port)] * 2)
+
+    def test_ollama_requests_do_not_follow_redirects(self):
+        from xiaomao.ollama_runtime import api_get, api_post
+
+        connection = Mock()
+        connection.makefile.side_effect = lambda *args: io.BytesIO(
+            b"HTTP/1.1 302 Found\r\nLocation: http://other.example.invalid/api\r\nContent-Length: 0\r\n\r\n"
+        )
+        with (
+            patch("urllib.request._opener", None),
+            patch("urllib.request.getproxies", return_value={}),
+            patch("socket.create_connection", return_value=connection) as connect,
+        ):
+            self.assertIsNone(api_get(self.cfg, "/api/tags"))
+            with self.assertRaises(HTTPError) as error:
+                api_post(self.cfg, "/api/chat", {"message": "虚构项目资料"})
+            self.assertEqual(error.exception.code, 302)
+            self.assertEqual([call.args[0] for call in connect.call_args_list], [("127.0.0.1", 11434)] * 2)
 
     def test_only_registered_models_and_no_records(self):
         code, _out, err, client = self.ask(model="some-cloud-model")
