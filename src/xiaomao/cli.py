@@ -172,20 +172,19 @@ def cmd_status(ns: argparse.Namespace) -> int:
 def _maybe_model_note(
     ns: argparse.Namespace,
     cfg,
-    conn,
     project_id: str | None,
     *,
     scheduled: bool = False,
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, dict | None]:
     with_model = bool(getattr(ns, "with_model", False))
     if not with_model and not scheduled:
-        return None, False
+        return None, None
     from pathlib import Path as P
 
+    from xiaomao.briefing import extra_for_summarize
     from xiaomao.eval_runner import host_pressure
     from xiaomao.ops import (
         evidence_snapshot_key,
-        record_summary_row,
         reuse_summary_note,
         should_call_depth_model,
         storage_over_budget,
@@ -195,38 +194,41 @@ def _maybe_model_note(
 
     eligible = [p for p in cfg.projects if not project_exclusion_reason(p)]
     if not eligible:
-        return None, False
+        return None, None
     pid = project_id or eligible[0].project_id
-    if project_exclusion_reason(cfg.project(pid)):
-        return None, False
+    project = cfg.project(pid)
+    if project_exclusion_reason(project):
+        return None, None
     from xiaomao.handoff_view import snapshot, scan_covers_scope
 
-    current = snapshot(conn, cfg.project(pid))
-    if not current["scan"] or not scan_covers_scope(current["scan"], current["observations"], cfg.project(pid)):
-        return None, False
-    facts = facts_payload(cfg, conn, pid)
-    if not any(w.get("observation_id") for w in facts["worktrees"]):
-        return None, False
-    call, reason = should_call_depth_model(conn, facts, with_model=with_model, scheduled=scheduled)
-    if not call:
-        if reason.startswith("dedup:"):
-            prior = latest_summary_for_range(conn, pid, evidence_snapshot_key(facts))
-            if prior is not None:
-                note = reuse_summary_note(prior, facts)
-                if note is None:
-                    return degrade_note("已保存的解读未通过当前校验"), False
-                return note, prior["validation_status"] == "pass"
-        if reason == "infer_paused":
-            return degrade_note("推理已暂停"), False
-        if reason == "no_new_evidence":
-            return None, False
-        if reason == "rules_only":
-            return None, False
-        return degrade_note(reason), False
+    paths = layout(P(cfg.home))
+    with ScanLock(paths["lock"], retries=5, retry_s=1.0), open_db(paths["db"]) as conn:
+        current = snapshot(conn, project)
+        if not current["scan"] or not scan_covers_scope(current["scan"], current["observations"], project):
+            return None, None
+        facts = facts_payload(cfg, conn, pid)
+        if not any(w.get("observation_id") for w in facts["worktrees"]):
+            return None, None
+        extra = extra_for_summarize(cfg, pid)
+        current["model_input_key"] = evidence_snapshot_key(facts, extra=extra)
+        call, reason = should_call_depth_model(conn, facts, with_model=with_model, scheduled=scheduled, extra=extra)
+        if not call:
+            if reason.startswith("dedup:"):
+                prior = latest_summary_for_range(conn, pid, current["model_input_key"])
+                if prior is not None:
+                    note = reuse_summary_note(prior, facts)
+                    if note is None:
+                        return degrade_note("已保存的解读未通过当前校验"), current
+                    return note, current
+            if reason == "infer_paused":
+                return degrade_note("推理已暂停"), current
+            if reason in {"no_new_evidence", "rules_only"}:
+                return None, None
+            return degrade_note(reason), current
 
     if storage_over_budget(P(cfg.home)):
-        insert_event(conn, kind="storage_over_budget", project_id=pid)
-        return degrade_note("内置数据超过 2GB 预算，本轮不写新的模型正文"), False
+        current["model_events"] = [("storage_over_budget", None)]
+        return degrade_note("内置数据超过 2GB 预算，本轮不写新的模型正文"), current
 
     client = None
     try:
@@ -239,9 +241,6 @@ def _maybe_model_note(
     except Exception:
         client = None
 
-    from xiaomao.briefing import extra_for_summarize
-
-    extra = extra_for_summarize(cfg, project_id)
     before = host_pressure()
     result = summarize_or_degrade(cfg, facts, extra=extra, client=client)
     after = host_pressure()
@@ -254,25 +253,17 @@ def _maybe_model_note(
         loaded_after = [m.get("name") or m.get("model") for m in models if isinstance(m, dict)]
     except Exception:
         loaded_after = None
-    insert_event(
-        conn,
-        kind="host_pressure",
-        project_id=pid,
-        payload={"before": before, "after": after, "loaded_after": loaded_after},
-    )
-    insert_event(
-        conn,
-        kind="model_unload",
-        project_id=pid,
-        payload={"loaded_after": loaded_after, "keep_alive": 0},
-    )
     raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
     model = (raw.get("model") if raw else None) or (
         cfg.depth_candidates[0] if cfg.depth_candidates else cfg.lite_model
     )
+    current["model_events"] = [
+        ("host_pressure", {"before": before, "after": after, "loaded_after": loaded_after}),
+        ("model_unload", {"loaded_after": loaded_after, "keep_alive": 0}),
+    ]
     if client is not None:
-        record_summary_row(conn, facts=facts, result=result, model=str(model))
-    return result.get("model_note"), bool(result.get("ok"))
+        current["summary"] = dict(facts=facts, result=result, model=str(model), extra=extra)
+    return result.get("model_note"), current
 
 
 def cmd_daily(ns: argparse.Namespace) -> int:
@@ -345,9 +336,11 @@ def cmd_ingest_briefing(ns: argparse.Namespace) -> int:
 
 
 def cmd_handoff(ns: argparse.Namespace) -> int:
-    from xiaomao.reports import write_handoff
+    from xiaomao.briefing import extra_for_summarize
+    from xiaomao.ops import evidence_snapshot_key, record_summary_row
+    from xiaomao.reports import facts_payload, write_handoff
     from xiaomao.scope import project_exclusion_reason
-    from xiaomao.handoff_view import inspect_handoff
+    from xiaomao.handoff_view import inspect_handoff, scan_covers_scope, snapshot
 
     home = _home_from_args(ns)
     ensure_layout(home)
@@ -356,8 +349,28 @@ def cmd_handoff(ns: argparse.Namespace) -> int:
     if reason := project_exclusion_reason(cfg.project(ns.project)):
         sys.stderr.write(f"范围已排除：{reason}\n")
         return 3
-    with ScanLock(layout(home)["lock"], retries=5, retry_s=1.0), open_db(layout(home)["db"]) as conn:
-        note, _ok = _maybe_model_note(ns, cfg, conn, ns.project, scheduled=False)
+    note, source = _maybe_model_note(ns, cfg, ns.project, scheduled=False)
+    with ScanLock(layout(home)["lock"], retries=5, blocking=source is not None), open_db(layout(home)["db"]) as conn:
+        if source is not None:
+            cfg = load_config(home)
+            cfg.home = str(home)
+            project = cfg.project(ns.project)
+            if reason := project_exclusion_reason(project):
+                sys.stderr.write(f"范围已排除：{reason}\n")
+                return 3
+            latest = snapshot(conn, project)
+            fresh = (latest["observations"] == source["observations"]
+                     and scan_covers_scope(source["scan"], latest["observations"], project)
+                     and latest["scan"] is not None and latest["scan"]["outcome"] == "success"
+                     and scan_covers_scope(latest["scan"], latest["observations"], project)
+                     and source["model_input_key"] == evidence_snapshot_key(
+                         facts_payload(cfg, conn, ns.project), extra=extra_for_summarize(cfg, ns.project)))
+            if not fresh:
+                note = None
+            for kind, payload in source.get("model_events", ()):
+                insert_event(conn, kind=kind, project_id=ns.project, payload=payload)
+            if fresh and "summary" in source:
+                record_summary_row(conn, **source["summary"])
         dest = write_handoff(cfg, conn, ns.project, model_note=note)
     sys.stdout.write(f"{dest}\n")
     view = inspect_handoff(home, ns.project)

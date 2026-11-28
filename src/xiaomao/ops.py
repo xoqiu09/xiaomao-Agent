@@ -41,23 +41,11 @@ def _tz(cfg: AppConfig):
         return ZoneInfo("Asia/Taipei")
 
 
-def evidence_snapshot_key(facts: dict[str, Any]) -> str:
-    """Stable key for date/worktree/evidence dedup. Program facts only."""
-    trees = []
-    for wt in facts.get("worktrees") or []:
-        trees.append(
-            {
-                "worktree_id": wt.get("worktree_id"),
-                "observation_id": wt.get("observation_id"),
-                "head_oid": wt.get("head_oid"),
-                "staged_count": wt.get("staged_count"),
-                "unstaged_count": wt.get("unstaged_count"),
-                "untracked_count": wt.get("untracked_count"),
-                "scan_enabled": wt.get("scan_enabled"),
-            }
-        )
+def evidence_snapshot_key(facts: dict[str, Any], *, extra: str = "") -> str:
+    """Bind an interpretation to the facts and briefing the model receives."""
+    stable_facts = {key: value for key, value in facts.items() if key != "generated_at"}
     blob = json.dumps(
-        {"project_id": facts.get("project_id"), "worktrees": trees},
+        {"facts": stable_facts, "briefing": extra},
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -201,13 +189,14 @@ def should_call_depth_model(
     *,
     with_model: bool,
     scheduled: bool,
+    extra: str = "",
 ) -> tuple[bool, str]:
     """Decide whether to load qwen3-coder:30b. Scan path never reaches here."""
     if not with_model and not scheduled:
         return False, "rules_only"
     if infer_paused(conn):
         return False, "infer_paused"
-    snapshot = evidence_snapshot_key(facts)
+    snapshot = evidence_snapshot_key(facts, extra=extra)
     pid = facts.get("project_id") or ""
     prior = latest_summary_for_range(conn, pid, snapshot)
     if prior is not None and prior["validation_status"] == "pass":
@@ -236,6 +225,7 @@ def record_summary_row(
     facts: dict[str, Any],
     result: dict[str, Any],
     model: str,
+    extra: str = "",
 ) -> str:
     sid = f"sum_{uuid.uuid4().hex[:16]}"
     payload = result.get("payload") or {}
@@ -245,7 +235,7 @@ def record_summary_row(
         {
             "summary_id": sid,
             "project_id": facts.get("project_id") or "",
-            "observation_range": evidence_snapshot_key(facts),
+            "observation_range": evidence_snapshot_key(facts, extra=extra),
             "model_identifier": model,
             "model_digest": raw.get("digest") if isinstance(raw, dict) else None,
             "prompt_version": "v0.1-summarize-b",

@@ -9,9 +9,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import chdir, redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import chdir, redirect_stderr, redirect_stdout
 from itertools import product
 from pathlib import Path
+from threading import Event, Timer
 from unittest.mock import Mock, patch
 
 from xiaomao import schedule
@@ -73,6 +75,7 @@ class ReportCliTests(unittest.TestCase):
         self.assertIn("约束", text)
 
     def test_handoff_checks_completion_per_sentence(self) -> None:
+        from xiaomao.briefing import extra_for_summarize
         from xiaomao.config import load_config
         from xiaomao.ops import record_summary_row
         from xiaomao.reports import facts_payload
@@ -95,8 +98,10 @@ class ReportCliTests(unittest.TestCase):
                 payload[section].append(item)
                 if cached:
                     with open_db(home / "xiaomao.sqlite") as conn:
-                        facts = facts_payload(load_config(home), conn, "website")
-                        record_summary_row(conn, facts=facts, result={"ok": True, "payload": payload}, model="fixture")
+                        cfg = load_config(home)
+                        facts = facts_payload(cfg, conn, "website")
+                        record_summary_row(conn, facts=facts, result={"ok": True, "payload": payload}, model="fixture",
+                                           extra=extra_for_summarize(cfg, "website"))
                 client = Mock()
                 client.generate_json.return_value = {"json": payload}
                 with (
@@ -141,6 +146,165 @@ class ReportCliTests(unittest.TestCase):
         self.assertEqual(client.generate_json.call_count, 1)
         self.assertTrue(all("校验：pass" in body for body in bodies))
         self.assertEqual([limit in body for body in bodies], [True, True], limit)
+
+    def test_handoff_model_wait_allows_scan_and_discards_stale_note(self) -> None:
+        home = self._home()
+        scan_results = []
+        old_note = "继续检查旧版笔记的导出结果"
+
+        def generate_json(**kwargs):
+            (home.parent / "repo" / "README.md").write_text("new state\n")
+            scan_results.append(subprocess.run(
+                [sys.executable, "-m", "xiaomao", "--home", str(home), "scan", "--project", "website"],
+                capture_output=True, text=True, timeout=15, check=False,
+            ))
+            return {"json": {"interpretations": [], "suggestions": [], "unknowns": [{"text": old_note}]}}
+
+        client = Mock()
+        client.generate_json.side_effect = generate_json
+        with (
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            patch("xiaomao.ollama_runtime.api_get", return_value={}),
+            patch("xiaomao.eval_runner.host_pressure", return_value={}),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = main(["--home", str(home), "handoff", "--project", "website", "--with-model"])
+
+        client.generate_json.assert_called_once()
+        result = scan_results[0]
+        scan = json.loads(result.stdout)
+        self.assertEqual((result.returncode, scan["outcome"], scan.get("error")), (0, "success", None))
+        self.assertEqual(code, 0)
+        body = Path(output.getvalue().strip()).read_text(encoding="utf-8")
+        self.assertIn("unstaged 1", body)
+        self.assertNotIn(old_note, body)
+
+    def test_handoff_waits_for_scan_after_model_returns(self) -> None:
+        from xiaomao.collect import scan_authorized
+        from xiaomao.config import load_config
+
+        home = self._home()
+        db = home / "xiaomao.sqlite"
+        scanning, finish_scan = Event(), Event()
+        note = "继续检查旧版笔记的导出结果"
+
+        def scan():
+            with ScanLock(home / "xiaomao.lock"), open_db(db) as conn:
+                scan_authorized(conn, load_config(home), "website")
+                conn.execute("UPDATE meta SET value=value WHERE key='schema'")
+                scanning.set()
+                if not finish_scan.wait(15):
+                    raise TimeoutError("test did not release scan")
+
+        def generate_json(**kwargs):
+            (home.parent / "repo" / "README.md").write_text("new state\n")
+            scans.append(pool.submit(scan))
+            if not scanning.wait(10):
+                raise TimeoutError("test scan did not take the write lock")
+            Timer(6.25, finish_scan.set).start()  # Outlast both old five-second waits.
+            return {"json": {"interpretations": [], "suggestions": [], "unknowns": [{"text": note}]}}
+
+        client = Mock()
+        client.generate_json.side_effect = generate_json
+        scans = []
+        with (
+            ThreadPoolExecutor(max_workers=1) as pool,
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            patch("xiaomao.ollama_runtime.api_get", return_value={}),
+            patch("xiaomao.eval_runner.host_pressure", return_value={}),
+            redirect_stdout(io.StringIO()) as output,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            code = main(["--home", str(home), "handoff", "--project", "website", "--with-model"])
+            scans[0].result(timeout=15)
+
+        client.generate_json.assert_called_once()
+        self.assertEqual((code, error.getvalue()), (0, ""))
+        body = Path(output.getvalue().strip()).read_text(encoding="utf-8")
+        self.assertIn("unstaged 1", body)
+        self.assertNotIn(note, body)
+        with open_db(db) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM summaries").fetchone()[0], 0)
+
+    def test_handoff_drops_inflight_note_when_model_material_changes(self) -> None:
+        from xiaomao.config import load_config
+
+        for change in ("timezone", "briefing"):
+            with self.subTest(change=change):
+                home = self._home()
+                cfg = load_config(home)
+                cfg.timezone = "Asia/Taipei"
+                save_config(cfg)
+                briefing = "旧版笔记说明"
+                old_note = "按旧的项目资料检查笔记导出"
+
+                def generate_json(**kwargs):
+                    nonlocal briefing
+                    if change == "timezone":
+                        cfg.timezone = "UTC"
+                        save_config(cfg)
+                    else:
+                        briefing = "新版笔记说明"
+                    return {"json": {"interpretations": [], "suggestions": [], "unknowns": [{"text": old_note}]}}
+
+                client = Mock()
+                client.generate_json.side_effect = generate_json
+                with (
+                    patch("xiaomao.briefing.extra_for_summarize", side_effect=lambda *args: briefing),
+                    patch("xiaomao.ollama_runtime.models_dir_allowed"),
+                    patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+                    patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+                    patch("xiaomao.ollama_runtime.api_get", return_value={}),
+                    patch("xiaomao.eval_runner.host_pressure", return_value={}),
+                    redirect_stdout(io.StringIO()) as output,
+                ):
+                    self.assertEqual(main(["--home", str(home), "handoff", "--project", "website", "--with-model"]), 0)
+
+                request = client.generate_json.call_args.kwargs["user"]
+                self.assertIn('"timezone": "Asia/Taipei"', request)
+                self.assertIn("旧版笔记说明", request)
+                body = Path(output.getvalue().strip()).read_text(encoding="utf-8")
+                self.assertIn(f"时区：{cfg.timezone}", body)
+                self.assertNotIn(old_note, body)
+                with open_db(home / "xiaomao.sqlite") as conn:
+                    self.assertEqual(conn.execute("SELECT count(*) FROM summaries").fetchone()[0], 0)
+
+    def test_handoff_only_reuses_cache_for_the_same_model_material(self) -> None:
+        from xiaomao.config import load_config
+
+        home = self._home()
+        cfg = load_config(home)
+        cfg.timezone = "Asia/Taipei"
+        save_config(cfg)
+        client = Mock()
+        args = ["--home", str(home), "handoff", "--project", "website", "--with-model"]
+        with (
+            patch("xiaomao.briefing.extra_for_summarize") as briefing,
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            patch("xiaomao.ollama_runtime.api_get", return_value={}),
+            patch("xiaomao.eval_runner.host_pressure", return_value={}),
+        ):
+            cases = (("Asia/Taipei", "旧说明", "旧解读", 1), ("Asia/Taipei", "旧说明", "旧解读", 1),
+                     ("UTC", "旧说明", "新时区解读", 2), ("UTC", "新说明", "新说明解读", 3))
+            for zone, extra, note, calls in cases:
+                with self.subTest(zone=zone, extra=extra, calls=calls):
+                    cfg.timezone = zone
+                    save_config(cfg)
+                    briefing.return_value = extra
+                    client.generate_json.return_value = {
+                        "json": {"interpretations": [], "suggestions": [], "unknowns": [{"text": note}]},
+                    }
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(main(args), 0)
+                    body = Path(output.getvalue().strip()).read_text(encoding="utf-8")
+                    self.assertIn(note, body)
+                    self.assertEqual(client.generate_json.call_count, calls)
 
     def test_handoff_reuse_marks_legacy_summary_without_unknowns(self) -> None:
         from xiaomao.ops import evidence_snapshot_key, record_summary_row, reuse_summary_note

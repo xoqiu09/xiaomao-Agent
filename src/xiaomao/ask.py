@@ -52,10 +52,13 @@ SYSTEM = (
     "answer 用一句话说明为什么没把握，handoff_question 写一句用户可以直接发给 Codex 或 Claude 的问题。"
     "records 每天的 status 列出所有项目当天结束时的状态，包括当天没有变化的项目："
     "unpushed_commits 是只在本机、还没推送的提交数；uncommitted_files 是还没提交的文件数；"
-    "unpushed_commits 为 null 表示当天没查到，不能当成 0；unpushed_at_least 为 true 表示至少这么多。"
+    "这两个数为 null 表示当天没查到，不能当成 0；unpushed_at_least 为 true 表示至少这么多。"
     "next_steps 是当时的建议。delivery_recheck 是补报查询的结果，按 at 的时间说明，不能当成当天的记录。"
-    "pushed_not_merged 是已经推送、还没合进主分支的提交数，它们不算「没推送」。"
-    "这些数量以最新一天的记录为准。"
+    "unpushed_commits 和 uncommitted_files 以最新一天的记录为准。"
+    "pushed_not_merged_in_window 只数当天记录中标为已推送、未合并的提交，不算「没推送」。"
+    "pushed_not_merged_total 为 null 表示项目总数未知；当天记录为 0、缺少状态或旧提交只出现在旧晚报，"
+    "都不能当成项目现在没有未合并提交。no_remote 只表示本机当时没有配置远端。"
+    "提到旧提交时说明它在哪一天被记录，之后有没有重新核对。"
 )
 
 
@@ -104,7 +107,7 @@ def project_facts(project: dict) -> dict:
     return facts
 
 
-def project_status(project: dict) -> dict | None:
+def project_status(project: dict, *, previously_pushed: bool = False) -> dict | None:
     """End-of-day counts and any separately dated follow-up."""
     from xiaomao.delivery_state import unpushed_count
     from xiaomao.feature_render import _commit_text, _state_label
@@ -113,10 +116,11 @@ def project_status(project: dict) -> dict | None:
     check = info.get("unpushed_check")
     observed = info.get("unpushed_window_at")
     unpushed, minimum = unpushed_count(info)
-    status = {"uncommitted_files": info.get("dirty_files", 0), "unpushed_commits": unpushed,
-              "pushed_not_merged": sum(s == "pushed" for s in info.get("commits", {}).values())}
-    if not check and not (info and unpushed is None) and not any(status.values()):
+    status = {"uncommitted_files": info.get("dirty_files", 0) if info else None, "unpushed_commits": unpushed,
+              "pushed_not_merged_in_window": sum(s == "pushed" for s in info.get("commits", {}).values())}
+    if not previously_pushed and not check and not (info and unpushed is None) and not any(status.values()):
         return None
+    status["pushed_not_merged_total"] = None
     if minimum:
         status["unpushed_at_least"] = True
     if check:
@@ -138,16 +142,25 @@ def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
     from xiaomao.delivery_state import preserve_window_delivery
     from xiaomao.feature_render import plain_next_steps, plain_summary_line
     days = []
+    previously_pushed = set()
     for bundle in bundles:
         chosen = [dict(p) for p in bundle["projects"] if _matches(p, project)]
         if project and not chosen:
             continue
         scoped = dict(bundle, projects=chosen)
         preserve_window_delivery(scoped)
+        statuses = []
+        for entry in chosen:
+            repo_id = entry["repo_id"]
+            status = project_status(entry, previously_pushed=repo_id in previously_pushed)
+            if status is not None:
+                statuses.append(status)
+                if status["pushed_not_merged_in_window"]:
+                    previously_pushed.add(repo_id)
         days.append({"date": bundle["window"]["date"], "summary": plain_summary_line(scoped),
                      "projects": [project_facts(p) for p in chosen if p["changed"]],
                      "no_change": [p["display_name"] for p in chosen if not p["changed"]],
-                     "status": [s for s in map(project_status, chosen) if s],
+                     "status": statuses,
                      "next_steps": plain_next_steps(scoped)[:3]})
     while len(days) > 1 and len(json.dumps(days, ensure_ascii=False)) > PACKET_CHAR_BUDGET:
         days.pop(0)

@@ -7,10 +7,11 @@ from pathlib import Path
 class ScanLock:
     """Simple exclusive lock so two scans cannot share one data dir."""
 
-    def __init__(self, path: Path, *, retries: int = 0, retry_s: float = 1.0):
+    def __init__(self, path: Path, *, retries: int = 0, retry_s: float = 1.0, blocking: bool = False):
         self.path = path
         self.retries = retries
         self.retry_s = retry_s
+        self.blocking = blocking
         self._fd: int | None = None
 
     def __enter__(self) -> "ScanLock":
@@ -24,7 +25,8 @@ class ScanLock:
             try:
                 import fcntl
 
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_EX if self.blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                fcntl.flock(fd, mode)
                 self._fd = fd
                 os.write(fd, str(os.getpid()).encode())
                 return self

@@ -172,6 +172,61 @@ class FeatureDailyTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertEqual(validate_records(project, packet, bad)["accepted"], 0)
 
+    def test_additions_cannot_support_a_removal_in_the_evening_report(self):
+        from tests.feature_helpers import response
+        from xiaomao.feature_daily import model_packet, validate_records
+        from xiaomao.feature_render import render_plain_summary
+
+        self.scan("2026-10-01T13:00:00+00:00")
+        (self.repo / "notes.py").write_text("def export_notes():\n    return 'notes'\n")
+        git(self.repo, "add", "notes.py")
+        git(self.repo, "commit", "-m", "Add note export")
+        self.scan("2026-10-02T03:00:00+00:00")
+        bundle = self.bundle()
+        project = bundle["projects"][0]
+        packet = model_packet(bundle, project)
+
+        added = response(packet, "增加了笔记导出功能。")["json"]
+        added["records"][0].update(feature_name="笔记导出", change_type="addition")
+        accepted = validate_records(project, packet, added)
+        self.assertIn("增加了笔记导出功能", render_plain_summary(bundle, {project["repo_id"]: accepted}))
+
+        claim = "移除了笔记导出功能"
+        for change_type, field in (("removal", "after"), ("behavior", "after"),
+                                   ("addition", "after"), ("addition", "impact")):
+            with self.subTest(change_type=change_type, field=field):
+                added["records"][0].update(change_type=change_type, after="增加了笔记导出功能。", impact="")
+                added["records"][0][field] = claim + "。"
+                rejected = validate_records(project, packet, added)
+                report = render_plain_summary(bundle, {project["repo_id"]: rejected})
+                self.assertNotIn(claim, report)
+                self.assertIn("Add note export", report)
+
+    def test_removed_code_can_support_a_removal_in_the_evening_report(self):
+        from xiaomao.feature_daily import model_packet, validate_records
+        from xiaomao.feature_render import render_plain_summary
+
+        path = self.repo / "notes.py"
+        path.write_text("def export_notes():\n    return 'notes'\n")
+        git(self.repo, "add", "notes.py")
+        git(self.repo, "commit", "-m", "Add note export")
+        self.scan("2026-10-01T13:00:00+00:00")
+        git(self.repo, "rm", "notes.py")
+        git(self.repo, "commit", "-m", "Remove note export")
+        self.scan("2026-10-02T03:00:00+00:00")
+        bundle = self.bundle()
+        project = bundle["projects"][0]
+        packet = model_packet(bundle, project)
+        removed = next(u for u in packet["units"] if "def export_notes" in u["before"] and not u["after"])
+        record = {"feature_name": "笔记导出", "change_type": "removal", "before": "", "impact": "",
+                  "after": "移除了笔记导出功能。", "unit_ids": [removed["unit_id"]],
+                  "support": [{"unit_id": removed["unit_id"], "side": "before", "quote": removed["before"]}]}
+        for change_type in ("removal", "behavior"):
+            with self.subTest(change_type=change_type):
+                record["change_type"] = change_type
+                accepted = validate_records(project, packet, {"records": [record]})
+                self.assertIn("移除了笔记导出功能", render_plain_summary(bundle, {project["repo_id"]: accepted}))
+
     def test_conflicting_worktrees_remain_separate(self):
         self.cfg.projects[0].worktree_policy = "all"
         self.catalog()
