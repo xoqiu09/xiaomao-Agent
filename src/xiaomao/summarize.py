@@ -217,6 +217,8 @@ def validate_model_json(payload: dict[str, Any], facts: dict[str, Any]) -> list[
             if not isinstance(ids, list):
                 errors.append("evidence_ids_type")
                 continue
+            if section == "interpretations" and not ids:
+                errors.append("missing_evidence:interpretations")
             for eid in ids:
                 if eid not in allowed:
                     errors.append(f"unknown_evidence:{eid}")

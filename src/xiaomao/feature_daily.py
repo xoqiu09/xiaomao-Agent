@@ -11,7 +11,7 @@ from pathlib import Path
 from xiaomao.change_evidence import safe_text
 from xiaomao.feature_context import fingerprint, match_features
 
-PROMPT_VERSION = "functional-daily-v9-removal-evidence"
+PROMPT_VERSION = "functional-daily-v10-separate-ongoing"
 CHANGE_TYPES = ("addition", "fix", "removal", "behavior", "reliability", "maintenance", "design", "unclear")
 _UNSUPPORTED = re.compile(
     r"已部署|已上线|测试.{0,12}通过|全部完成|任务完成|部署成功|已合并|已启用|"
@@ -61,7 +61,7 @@ quote_catalog 是程序从单元原文生成的引用清单。support 只输出 
 注意排除名单或拒绝名单增加成员表示更多对象被排除，不能解释为支持更多对象。
 maintenance 表示内部维护；snapshot_only 只能写影响待确认。restored/gone/head_change 不得解释为新增能力。
 delivery/progress/作者/上线/测试状态由程序计算，你不能声称已合并、上线、测试通过、性能提升或归为用户个人成果。
-ongoing_only 是遗留工作，不能写为今日新增。variant 不同的工作树实现必须分开。
+ongoing_only 是遗留工作，不能写为今日新增，也不能与当天的改动放在同一条解读。variant 不同的工作树实现必须分开。
 仅输出约定 JSON，不需要填满所有单元；未解读部分将保留为待确认。"""
 
 
@@ -225,14 +225,14 @@ def _coalesce(records):
     for record in records:
         # Unknown labels are not enough to assert two changes share a feature.
         identity = record["feature_name"] if record["feature_name"] not in {"相关功能", "工作状态"} else record["record_id"]
-        groups[(identity, record["variant"], record["progress"] == "restored")].append(record)
+        key = (identity, record["variant"], record["progress"] == "restored", record["today"])
+        groups[key].append(record)
     result = []
     for rows in groups.values():
         rows.sort(key=lambda r: (r["interpretation"] == "model_static", r["priority"]), reverse=True)
         main = dict(rows[0])
         if len(rows) > 1:
             main["related_records"] = rows[1:]
-            main["today"] = any(r["today"] for r in rows)
             main["has_ongoing"] = any(r["has_ongoing"] for r in rows)
             for field in ("unit_ids", "evidence_ids"):
                 main[field] = sorted({v for row in rows for v in row[field]})
@@ -382,6 +382,8 @@ def _checked_record(item, index, used):
             or len(refs) != len(set(refs))):
         raise ValueError("invalid_units")
     units = [index[r] for r in refs]
+    if len({u["ongoing_only"] for u in units}) > 1:
+        raise ValueError("mixed_ongoing_and_today")
     for key, limit in (("feature_name", 60), ("before", 160), ("after", 160), ("impact", 160)):
         value = item.get(key)
         if (not isinstance(value, str) or len(value) > limit or safe_text(value, limit) != value
@@ -483,7 +485,7 @@ def validate_records(project, packet, payload):
     remaining = defaultdict(list)
     for uid, unit in index.items():
         if uid not in used:
-            remaining[_key(unit)].append(unit)
+            remaining[(_key(unit), unit["ongoing_only"])].append(unit)
     for key, units in remaining.items():
         # Attach omitted versions of an already interpreted capability only as
         # explicit uncertainty. Do not borrow its interpretation for other deltas.
