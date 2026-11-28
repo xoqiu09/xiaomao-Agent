@@ -252,6 +252,7 @@ def record_summary_row(
             "facts_json": json.dumps(facts, ensure_ascii=False),
             "interpretations_json": json.dumps(payload.get("interpretations") or [], ensure_ascii=False),
             "suggestions_json": json.dumps(payload.get("suggestions") or [], ensure_ascii=False),
+            "unknowns_json": json.dumps(payload.get("unknowns") or [], ensure_ascii=False),
             "evidence_ids": json.dumps(facts.get("evidence_ids") or [], ensure_ascii=False),
             "validation_status": "pass" if result.get("ok") else "degraded",
             "generated_at": result.get("generated_at") or utc_now(),
@@ -280,24 +281,26 @@ def record_summary_row(
 def reuse_summary_note(row, facts: dict[str, Any]) -> str | None:
     from xiaomao.summarize import format_model_note, validate_model_json
 
+    saved_unknowns = row["unknowns_json"]
     try:
-        interpretations = json.loads(row["interpretations_json"] or "[]")
-        suggestions = json.loads(row["suggestions_json"] or "[]")
+        payload = {
+            "interpretations": json.loads(row["interpretations_json"] or "[]"),
+            "suggestions": json.loads(row["suggestions_json"] or "[]"),
+            "unknowns": [] if saved_unknowns is None else json.loads(saved_unknowns),
+        }
     except json.JSONDecodeError:
-        interpretations, suggestions = [], []
-    payload = {
-        "interpretations": interpretations,
-        "suggestions": suggestions,
-        "unknowns": [],
-    }
+        return None
     if validate_model_json(payload, facts):
         return None
-    return format_model_note(
+    note = format_model_note(
         payload,
         model=row["model_identifier"] or "",
         digest=row["model_digest"],
         validation=row["validation_status"] or "pass",
-    ) + "\n（同一证据快照已有通过的解读，未再次加载模型。）"
+    )
+    if saved_unknowns is None:
+        note += "\n（这份旧解读没有保存“未知”一栏。）"
+    return note + "\n（同一证据快照已有通过的解读，未再次加载模型。）"
 
 
 def latest_report(home: Path, kind: str, project_id: str = "website") -> Path | None:

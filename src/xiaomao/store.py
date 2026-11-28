@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS summaries (
   suggestions_json TEXT NOT NULL DEFAULT '[]',
   evidence_ids TEXT NOT NULL DEFAULT '[]',
   validation_status TEXT NOT NULL,
-  generated_at TEXT NOT NULL
+  generated_at TEXT NOT NULL,
+  unknowns_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -153,7 +154,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 
 def utc_now() -> str:
@@ -182,6 +183,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(FEATURE_SCHEMA)
     from xiaomao.documents import SCHEMA as DOCUMENT_SCHEMA
     conn.executescript(DOCUMENT_SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    if not any(column[1] == "unknowns_json" for column in conn.execute("PRAGMA table_info(summaries)")):
+        conn.execute("ALTER TABLE summaries ADD COLUMN unknowns_json TEXT")
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
         ("schema", SCHEMA_VERSION),
@@ -275,11 +279,11 @@ def insert_summary(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         INSERT INTO summaries(
           summary_id, project_id, observation_range, model_identifier, model_digest,
           prompt_version, facts_json, interpretations_json, suggestions_json,
-          evidence_ids, validation_status, generated_at
+          evidence_ids, validation_status, generated_at, unknowns_json
         ) VALUES (
           :summary_id, :project_id, :observation_range, :model_identifier, :model_digest,
           :prompt_version, :facts_json, :interpretations_json, :suggestions_json,
-          :evidence_ids, :validation_status, :generated_at
+          :evidence_ids, :validation_status, :generated_at, :unknowns_json
         )
         """,
         row,

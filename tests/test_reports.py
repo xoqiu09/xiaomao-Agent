@@ -86,8 +86,6 @@ class ReportCliTests(unittest.TestCase):
             ("unknowns", "没有证据表明笔记已上线。", True),
         )
         for (section, model_text, accepted), cached in product(cases, (False, True)):
-            if cached and section == "unknowns":
-                continue  # The cache stores only interpretations and suggestions.
             with self.subTest(section=section, model_text=model_text, cached=cached):
                 home = self._home()
                 payload = {"interpretations": [], "suggestions": [], "unknowns": []}
@@ -119,6 +117,52 @@ class ReportCliTests(unittest.TestCase):
                 else:
                     self.assertIn("本报告由规则程序生成", body)
                     self.assertNotIn("笔记已上线", body)
+
+    def test_handoff_reuse_preserves_model_unknowns(self) -> None:
+        home = self._home()
+        limit = "离线导出能否恢复原有笔记，还没有验证"
+        client = Mock()
+        client.generate_json.return_value = {
+            "json": {"interpretations": [], "suggestions": [], "unknowns": [{"text": limit}]},
+        }
+        args = ["--home", str(home), "handoff", "--project", "website", "--with-model"]
+        bodies = []
+        with (
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            patch("xiaomao.ollama_runtime.api_get", return_value={}),
+            patch("xiaomao.eval_runner.host_pressure", return_value={}),
+        ):
+            for _ in range(2):
+                with redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(main(args), 0)
+                bodies.append(Path(output.getvalue().strip()).read_text(encoding="utf-8"))
+        self.assertEqual(client.generate_json.call_count, 1)
+        self.assertTrue(all("校验：pass" in body for body in bodies))
+        self.assertEqual([limit in body for body in bodies], [True, True], limit)
+
+    def test_handoff_reuse_marks_legacy_summary_without_unknowns(self) -> None:
+        from xiaomao.ops import evidence_snapshot_key, record_summary_row, reuse_summary_note
+        from xiaomao.store import latest_summary_for_range
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / "xiaomao.sqlite"
+        facts = {"project_id": "website"}
+        text = "可继续检查离线导出"
+        with open_db(db) as conn:
+            record_summary_row(
+                conn, facts=facts, model="fixture",
+                result={"ok": True, "payload": {"interpretations": [{"text": text}]}},
+            )
+            if any(column[1] == "unknowns_json" for column in conn.execute("PRAGMA table_info(summaries)")):
+                conn.execute("ALTER TABLE summaries DROP COLUMN unknowns_json")
+            conn.execute("UPDATE meta SET value='5' WHERE key='schema'")
+
+        with open_db(db) as conn:
+            row = latest_summary_for_range(conn, "website", evidence_snapshot_key(facts))
+            note = reuse_summary_note(row, facts)
+        self.assertIn(text, note)
+        self.assertIn("这份旧解读没有保存“未知”一栏", note)
 
     def test_facts_payload_includes_worktree_evidence_ids(self) -> None:
         from xiaomao.config import load_config
@@ -357,7 +401,7 @@ class MigrateLockScheduleTests(unittest.TestCase):
         report = backup_sqlite(src, dest)
         self.assertEqual(report["integrity"], "ok")
         con = sqlite3.connect(dest)
-        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "5")
+        self.assertEqual(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "6")
         self.assertEqual(con.execute("SELECT value FROM meta WHERE key='probe'").fetchone()[0], "1")
         con.close()
         with self.assertRaises(FileExistsError):

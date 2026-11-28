@@ -232,6 +232,57 @@ class DailyRegressionTests(unittest.TestCase):
         from xiaomao.daily import build_bundle
         return build_bundle(self.cfg, self.conn, date=date, now=datetime(2026, 10, 3, tzinfo=timezone.utc))
 
+    def test_switch_at_same_commit_is_evidence_only(self):
+        from xiaomao.feature_daily import project_units
+        from xiaomao.feature_render import render_details, render_plain_summary
+
+        self.scan("2026-10-01T13:00:00+00:00")
+        git(self.repo, "switch", "-c", "same-commit")
+        self.scan("2026-10-02T03:00:00+00:00")
+
+        bundle = self.bundle()
+        body = render_plain_summary(bundle, {})
+        self.assertEqual(body.splitlines()[1], "今天没有新的进展。")
+        self.assertNotIn("有过改动", body)
+        detail = render_details(bundle, {})
+        self.assertIn("同一提交上的分支切换", detail)
+        self.assertIn("main → same-commit", detail)
+        self.assertEqual(project_units(bundle["projects"][0]), [])
+
+    def test_switch_with_untracked_file_beyond_evidence_limit_counts_as_progress(self):
+        from xiaomao.feature_render import render_plain_summary
+
+        for number in range(200):
+            (self.repo / f"draft-{number:03}.txt").write_text("draft\n")
+        self.scan("2026-10-01T13:00:00+00:00")
+        git(self.repo, "switch", "-c", "same-commit")
+        (self.repo / "draft-200.txt").write_text("another draft\n")
+        self.scan("2026-10-02T03:00:00+00:00")
+
+        bundle = self.bundle()
+        project, = bundle["projects"]
+        ongoing, = project["ongoing"]
+        self.assertEqual(ongoing["untracked"], 201)
+        self.assertEqual(len(ongoing["files"]), 200)
+        self.assertEqual(render_plain_summary(bundle, {}).splitlines()[1], "今天 1 个项目有进展。")
+        event, = project["activity"]
+        self.assertEqual((event["kind"], event["paths"]), ("workspace", []))
+
+    def test_switch_before_first_commit_is_evidence_only(self):
+        from xiaomao.feature_render import render_details, render_plain_summary
+
+        self.repo = init_repo(self.root / "empty", initial_commit=False)
+        self.cfg = website_fixture_config(self.root / "home", self.repo)
+        self.assertEqual(self.scan("2026-10-01T13:00:00+00:00")["status"], "ok")
+        git(self.repo, "switch", "-c", "demo")
+        self.assertEqual(self.scan("2026-10-02T03:00:00+00:00")["status"], "ok")
+
+        bundle = self.bundle()
+        self.assertEqual(render_plain_summary(bundle, {}).splitlines()[1], "今天没有新的进展。")
+        detail = render_details(bundle, {})
+        self.assertIn("首次提交前的分支切换", detail)
+        self.assertIn("main → demo", detail)
+
     def test_unchanged_old_dirty_is_ongoing_not_new_work(self):
         (self.repo / "README.md").write_text("unfinished yesterday\n")
         self.scan("2026-10-01T12:00:00+00:00")

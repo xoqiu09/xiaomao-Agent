@@ -229,7 +229,7 @@ class DocumentsTests(unittest.TestCase):
         self.save()
         with sqlite3.connect(self.home / "xiaomao.sqlite") as conn:
             self.assertEqual(conn.execute("SELECT confirmed_goal_or_decision FROM user_notes").fetchone()[0], "keep")
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "5")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0], "6")
 
     def test_renamed_company_worktree_rejected_before_reading_document(self):
         disguised = self.root / "renamed"
