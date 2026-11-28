@@ -9,11 +9,13 @@ import tempfile
 import unittest
 from argparse import Namespace
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
-from tests.plain_scenario import NOW, build, make_day
+from tests.helpers import git, init_repo, website_fixture_config
+from tests.plain_scenario import NOW, build, make_day, scan
 from xiaomao.ask import ask_command, build_packet, recent_bundles, validated
 from xiaomao.config import save_config
 from xiaomao.daily_jobs import run_daily
@@ -122,9 +124,66 @@ class AskTests(unittest.TestCase):
         status = {s["project"]: s for s in build_packet([bundle])[0]["status"]}
         self.assertEqual(status["mini-exchange"]["unpushed_commits"], 5)
         self.assertEqual((status["Session Steward"]["unpushed_commits"],
-                          status["Session Steward"]["pushed_not_merged"]), (0, 1))
+                          status["Session Steward"]["pushed_not_merged_in_window"]), (0, 1))
         self.assertNotIn("QAI", status)                                   # nothing pending
         self.assertEqual(self.packet("不存在的项目"), [])
+
+    def test_pushed_not_merged_daily_count_is_not_the_project_total(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        repo = init_repo(root / "repo")
+        home = root / "home"
+        cfg = website_fixture_config(home, repo)
+        cfg.timezone = "Asia/Taipei"
+        save_config(cfg)
+        git(repo, "remote", "add", "origin", str(root / "remote.git"))
+        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        scan(cfg, "2026-11-24T14:00:00+00:00")
+
+        git(repo, "switch", "-c", "export")
+        (repo / "notes.py").write_text("def export_notes():\n    return 'notes'\n")
+        git(repo, "add", "notes.py")
+        at = "2026-11-25T03:00:00+00:00"
+        with patch.dict("os.environ", {"GIT_COMMITTER_DATE": at, "GIT_AUTHOR_DATE": at}):
+            git(repo, "commit", "-m", "Add note export")
+        git(repo, "update-ref", "refs/remotes/origin/export", "HEAD")
+
+        for day in ("2026-11-25", "2026-11-26"):
+            if day == "2026-11-26":
+                (repo / "draft.py").write_text("draft = True\n")
+            scan(cfg, f"{day}T07:00:00+00:00")
+            now = datetime.fromisoformat(f"{day}T14:00:00+00:00")
+            with patch("xiaomao.collect.utc_now", return_value=now.isoformat()):
+                run_daily(cfg, date=day, now=now)
+
+        ns = Namespace(question="现在还有几条已推送、未合并的提交？", days=2, project="website", model=None)
+        client = FakeClient({"answer": "资料不够。", "sources": ["2026-11-25"]})
+        code = ask_command(ns, home, client_factory=lambda cfg: client, today="2026-11-26",
+                           out=io.StringIO(), err=io.StringIO())
+        self.assertEqual(code, 0)
+        first, second = json.loads(client.calls[0]["user"])["records"]
+        self.assertEqual(first["projects"][0]["commits"], [{"title": "Add note export", "where": "🔵 已推送"}])
+        self.assertEqual(second["projects"][0]["commits"], [])
+        statuses = [day["status"][0] for day in (first, second)]
+        self.assertEqual([s.get("pushed_not_merged_in_window") for s in statuses], [1, 0], statuses)
+        self.assertIn("pushed_not_merged_total", statuses[1])
+        self.assertIsNone(statuses[1]["pushed_not_merged_total"])
+
+    def test_previous_push_stays_visible_on_a_clean_day_or_after_removing_local_remote(self):
+        project = {"project_id": "website", "repo_id": "site", "display_name": "笔记站", "changed": False,
+                   "commits": [], "ongoing": [], "activity": [], "trees": []}
+        yesterday = {"window": {"date": "2026-11-25"}, "projects": [dict(project, changed=True,
+                     delivery_state={"has_remote": True, "commits": {"a" * 40: "pushed"}})]}
+        for has_remote, dirty_files in ((True, 0), (False, 1), (False, 0), (None, None)):
+            with self.subTest(has_remote=has_remote, dirty_files=dirty_files):
+                delivery = {"has_remote": has_remote, "commits": {}, "dirty_files": dirty_files} if has_remote is not None else {}
+                today = {"window": {"date": "2026-11-26"}, "projects": [dict(project, delivery_state=delivery)]}
+                first, second = build_packet([yesterday, today], project="website")
+                self.assertEqual(first["status"][0]["pushed_not_merged_in_window"], 1)
+                self.assertEqual([
+                    (s["project"], s["pushed_not_merged_in_window"], s["pushed_not_merged_total"], s["uncommitted_files"])
+                    for s in second["status"]
+                ], [("笔记站", 0, None, dirty_files)])
 
     def test_answer_names_its_days(self):
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()

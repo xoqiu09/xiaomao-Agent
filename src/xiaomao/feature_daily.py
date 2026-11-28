@@ -11,13 +11,16 @@ from pathlib import Path
 from xiaomao.change_evidence import safe_text
 from xiaomao.feature_context import fingerprint, match_features
 
-PROMPT_VERSION = "functional-daily-v8-reader-detail"
+PROMPT_VERSION = "functional-daily-v9-removal-evidence"
 CHANGE_TYPES = ("addition", "fix", "removal", "behavior", "reliability", "maintenance", "design", "unclear")
 _UNSUPPORTED = re.compile(
     r"已部署|已上线|测试.{0,12}通过|全部完成|任务完成|部署成功|已合并|已启用|"
     r"(?:性能|速度|效率).{0,10}(?:提升|提高|翻倍)|\d+\s*(?:%|倍|毫秒|ms)|"
     r"(?:确保|保障).{0,16}(?:完整|准确|成功)|(?:提升|改善|增强).{0,12}(?:准确性|可靠性|稳定性|适应能力|恢复能力)|"
     r"\b(deployed|released|merged|tests? pass(?:ed)?|faster|speedup)\b", re.I)
+_REMOVAL_CLAIM = re.compile(
+    r"(?:移除|删除|删掉|取消|停用|下线)了|(?:已(?:经)?|被)(?:移除|删除|删掉|取消|停用|下线)|"
+    r"不再(?:支持|提供|开放|允许使用)")
 _TECHNICAL = re.compile(r"(?:[\w.-]+/)+[\w.-]+|\b[\w-]+\.(?:py|go|ts|tsx|js|md|rs)\b|\b[0-9a-f]{12,40}\b")
 MODEL_SCHEMA = {
     "type": "object", "required": ["records"], "additionalProperties": False,
@@ -53,6 +56,7 @@ behavior/reliability 记录涉及完整的前后两侧改动时，before_explana
 quote_catalog 是程序从单元原文生成的引用清单。support 只输出 quote_id，选择清单中对应单元和方向的编号。
 不要重写、缩写或自行生成引用文字。每个非空 before_explanation/after_explanation 必须选择对应方向的 quote_id；每个单元也必须有引用支持。
 没有旧逻辑证据时 before_explanation 留空，不能称为修复。只有文档时 change_type=design，不能写已实现。
+文字声称功能被移除时，无论 change_type，必须引用 before 中实际删除的内容。
 本轮用 behavior 或 reliability 描述行为调整，用 addition 描述新能力；不输出 fix 类型，也不在文字里断言已修复。
 注意排除名单或拒绝名单增加成员表示更多对象被排除，不能解释为支持更多对象。
 maintenance 表示内部维护；snapshot_only 只能写影响待确认。restored/gone/head_change 不得解释为新增能力。
@@ -422,7 +426,10 @@ def _checked_record(item, index, used):
     support = item.get("support")
     if not isinstance(support, list) or not support or len(support) > 400:
         raise ValueError("missing_support")
+    removal = typ == "removal" or (kinds == {"code"} and any(
+        _REMOVAL_CLAIM.search(item[field]) for field in ("feature_name", "after", "impact")))
     supported, sides = set(), set()
+    removed_code_quoted = False
     for quote in support:
         if not isinstance(quote, dict):
             raise ValueError("invalid_support")
@@ -433,11 +440,14 @@ def _checked_record(item, index, used):
             raise ValueError("unsupported_direction")
         if side == "after" and index[uid]["superseded"]:
             raise ValueError("superseded_behavior")
+        if side == "before" and text.strip() not in index[uid]["after"]:
+            removed_code_quoted = True
         supported.add(uid)
         sides.add(side)
-    removal = typ == "removal" and all(not u["after"] for u in units)
+    if removal and not removed_code_quoted:
+        raise ValueError("removal_without_prior_behavior")
     if (supported != set(refs) or (item["before"] and "before" not in sides)
-            or ("after" not in sides and not removal)):
+            or ("after" not in sides and not (removal and all(not u["after"] for u in units)))):
         raise ValueError("claim_without_support")
     if typ == "fix" and (not item["before"] or "before" not in sides):
         raise ValueError("fix_without_prior_behavior")
