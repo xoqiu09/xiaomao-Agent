@@ -78,7 +78,7 @@ def generate(root):
             packet = json.loads(kwargs["user"])
             pid = packet["project_id"]
             calls.append(pid)
-            units = [u for u in packet["units"] if u["kind"] == "code"]
+            units = [u for u in packet["units"] if u["kind"] == "code" and not u["ongoing_only"]]
             name, before, after, impact = (
                 ("每日工作总结", "只返回未提交的工作。", "汇总当天的提交和未提交工作。", "提交后的成果可以与进行中的工作一起呈现。")
                 if pid == "website" else

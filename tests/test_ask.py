@@ -77,13 +77,106 @@ class AskTests(unittest.TestCase):
         self.assertNotRegex(text, r"[0-9a-f]{40}")
 
     def test_project_filter(self):
-        days = self.packet("笔记工具")
+        days = self.packet("notes")
         self.assertEqual([p["project"] for p in days[0]["projects"]], ["笔记工具"])
         self.assertEqual([s["project"] for s in days[0]["status"]], ["笔记工具"])
         self.assertTrue(days[0]["status"][0]["no_remote"])
         self.assertTrue(all(s.startswith("笔记工具") for s in days[0]["next_steps"]))
         self.assertNotIn("xiuqiu-site", days[0]["summary"])
         self.assertTrue(days[0]["summary"].startswith("今天 1 个项目有进展"))
+
+    def test_ask_project_id_takes_precedence_over_another_projects_name(self):
+        from tests.helpers import init_repo, website_fixture_config
+        from tests.plain_scenario import _commit, scan
+        from xiaomao.briefing import BriefingSource, briefing_path_for, write_cache
+        from xiaomao.config import ProjectSpec, WorktreeSpec
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        home = root / "home"
+        notes, ledger = (init_repo(root / name) for name in ("notes", "ledger"))
+        cfg = website_fixture_config(home, notes)
+        cfg.projects = [
+            ProjectSpec("ledger", "notes", str(ledger), [WorktreeSpec("ledger-main", str(ledger))]),
+            ProjectSpec("notes", "读书笔记", str(notes), [WorktreeSpec("notes-main", str(notes))]),
+        ]
+        save_config(cfg)
+        scan(cfg, "2026-10-01T13:40:00+00:00")
+        for repo, subject, purpose in [(notes, "添加书签", "保存读书笔记和书签。"),
+                                       (ledger, "添加月账单", "记录每月账单。")]:
+            _commit(repo, "feature.py", "enabled = True\n", subject, "2026-10-02T06:00:00+00:00")
+            source = BriefingSource(repo.name, briefing_path_for(cfg, repo.name), "", "a" * 64, 0)
+            write_cache(cfg, source, {"purpose": purpose}, model=cfg.ask_model, chunk_count=1)
+        with patch("xiaomao.collect.utc_now", return_value=NOW.isoformat()):
+            run_daily(cfg, date="2026-10-02", now=NOW)
+
+        for selector in ("notes", "读书笔记", "Notes"):
+            with self.subTest(selector=selector):
+                ns = Namespace(question="今天做了什么", days=7, project=selector, model=None)
+                client = FakeClient({"answer": "添加了书签。", "sources": ["2026-10-02"]})
+                code = ask_command(ns, home, client_factory=lambda cfg: client, today="2026-10-03",
+                                   out=io.StringIO(), err=io.StringIO())
+                self.assertEqual(code, 0)
+                sent = json.loads(client.calls[0]["user"])
+                day, = sent["records"]
+                commits = [c["title"] for p in day["projects"] for c in p["commits"]]
+                briefs = [(b["source"], b["purpose"]) for b in sent["project_briefs"]]
+                self.assertEqual((day["summary"], commits, briefs), (
+                    "今天 1 个项目有进展。", ["添加书签"], [("brief:notes", "保存读书笔记和书签。")]))
+                self.assertNotIn("月账单", client.calls[0]["user"])
+
+        cfg.projects[0].display_name = "NOTES"
+        save_config(cfg)
+        ns = Namespace(question="今天做了什么", days=7, project="NOTES", model=None)
+        client = FakeClient({"answer": "添加了月账单。", "sources": ["2026-10-02"]})
+        code = ask_command(ns, home, client_factory=lambda cfg: client, today="2026-10-03",
+                           out=io.StringIO(), err=io.StringIO())
+        self.assertEqual(code, 0)
+        sent = json.loads(client.calls[0]["user"])
+        day, = sent["records"]
+        commits = [c["title"] for p in day["projects"] for c in p["commits"]]
+        briefs = [(b["source"], b["purpose"]) for b in sent["project_briefs"]]
+        self.assertEqual((commits, briefs), (["添加月账单"], [("brief:ledger", "记录每月账单。")]))
+
+    def test_ask_by_second_registration_uses_shared_records_and_selected_brief(self):
+        from tests.helpers import init_repo, website_fixture_config
+        from tests.plain_scenario import _commit, scan
+        from xiaomao.briefing import BriefingSource, briefing_path_for, write_cache
+        from xiaomao.config import ProjectSpec, WorktreeSpec
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        home = root / "home"
+        repo = init_repo(root / "notes")
+        cfg = website_fixture_config(home, repo)
+        cfg.projects = [
+            ProjectSpec("book-main", "读书工具", str(repo), [WorktreeSpec("book-tree", str(repo))]),
+            ProjectSpec("notes", "读书笔记", str(repo), [WorktreeSpec("notes-tree", str(repo))]),
+        ]
+        save_config(cfg)
+        scan(cfg, "2026-10-01T13:40:00+00:00")
+        _commit(repo, "bookmarks.py", "enabled = True\n", "添加书签", "2026-10-02T06:00:00+00:00")
+        for project_id, purpose in (("book-main", "整理书目。"), ("notes", "保存读书笔记。")):
+            source = BriefingSource(project_id, briefing_path_for(cfg, project_id), "", "a" * 64, 0)
+            write_cache(cfg, source, {"purpose": purpose}, model=cfg.ask_model, chunk_count=1)
+        with patch("xiaomao.collect.utc_now", return_value=NOW.isoformat()):
+            run_daily(cfg, date="2026-10-02", now=NOW)
+        with open_db_readonly(home / "xiaomao.sqlite") as conn:
+            bundle, = recent_bundles(conn, cfg, days=1, until="2026-10-02")
+        project, = bundle["projects"]
+        self.assertEqual(project["project_id"], "book-main")
+        self.assertIn("notes", project["aliases"])
+
+        ns = Namespace(question="今天做了什么", days=1, project="notes", model=None)
+        client = FakeClient({"answer": "添加了书签。", "sources": ["2026-10-02"]})
+        err = io.StringIO()
+        code = ask_command(ns, home, client_factory=lambda cfg: client, today="2026-10-02",
+                           out=io.StringIO(), err=err)
+        self.assertEqual(code, 0, err.getvalue())
+        sent = json.loads(client.calls[0]["user"])
+        day, = sent["records"]
+        record, = day["projects"]
+        self.assertEqual([c["title"] for c in record["commits"]], ["添加书签"])
+        self.assertEqual([(b["source"], b["purpose"]) for b in sent["project_briefs"]],
+                         [("brief:notes", "保存读书笔记。")])
 
     def test_revoked_window_is_never_sent_to_model(self):
         from dataclasses import replace

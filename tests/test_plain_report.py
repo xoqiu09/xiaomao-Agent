@@ -162,6 +162,94 @@ class PlainReportTests(unittest.TestCase):
         self.assertIn("没有结果时可以一键清除筛选  🟢 已合并", text)
         self.assertNotIn("筛选可一键清除", text)
 
+    @staticmethod
+    def _export_bundle():
+        sha = "a" * 40
+        project = {"project_id": "notes", "display_name": "读书笔记", "repo_id": "notes",
+                   "changed": True, "activity": [], "gaps": [], "limitations": [],
+                   "commits": [{"sha": sha, "subject": "导出时保留笔记标题", "evidence_id": "commit:notes",
+                                "tree_id": "main", "context_version": "export",
+                                "files": [{"path": "export.py", "units": [
+                                    {"kind": "code", "after": "row.insert(0, note.title)", "basis": "diff"}]}]}],
+                   "ongoing": [{"tree_id": "draft", "observation_id": "yesterday", "context_version": "export",
+                                "files": [{"path": "draft_export.py", "units": [
+                                    {"kind": "code", "after": "return csv.writer(output)", "basis": "diff"}]}]}],
+                   "feature_contexts": {"export": {"features": [
+                       {"id": "export", "name": "笔记导出", "priority": 3, "paths": ["*export.py"]}]}},
+                   "delivery_state": {"has_remote": True, "commits": {sha: "merged"}, "dirty_files": 1}}
+        return {"window": {"date": "2026-10-02"}, "scope": [], "inventory_errors": [], "projects": [project]}
+
+    def test_yesterdays_model_note_does_not_hide_todays_merged_commit(self):
+        from tests.feature_helpers import response
+        from xiaomao.feature_daily import model_packet, validate_records
+
+        bundle = self._export_bundle()
+        project, = bundle["projects"]
+        old_explanation = "笔记可以导出为逗号分隔的文件。"
+        merged_line = "导出时保留笔记标题  🟢 已合并"
+        self.assertIn(merged_line, render_plain_summary(bundle, {}))
+        packet = model_packet(bundle, project)
+        old_units = [unit for unit in packet["units"] if unit["ongoing_only"]]
+        payload = response(dict(packet, units=old_units), old_explanation)["json"]
+        note = validate_records(project, packet, payload)
+        self.assertEqual(note["accepted"], 1)
+        text = render_plain_summary(bundle, {project["repo_id"]: note}, supplemented=True)
+        self.assertIn(merged_line, text)
+        self.assertNotIn(old_explanation.rstrip("。"), text)
+
+    def test_model_cannot_use_old_draft_to_describe_todays_merged_commit(self):
+        from tests.feature_helpers import response
+        from xiaomao.feature_daily import model_packet, validate_records
+
+        bundle = self._export_bundle()
+        project, = bundle["projects"]
+        packet = model_packet(bundle, project)
+        explanation = "导出的每行都会保留笔记标题。"
+        note = validate_records(project, packet, response(packet, explanation)["json"])
+        text = render_plain_summary(bundle, {"notes": note}, supplemented=bool(note["accepted"]))
+
+        self.assertIn("导出时保留笔记标题  🟢 已合并", text)
+        self.assertNotIn(explanation.rstrip("。"), text)
+        self.assertEqual((note["accepted"], note["rejected"]), (0, 1))
+        self.assertCountEqual([record["today"] for record in note["records"]], [True, False])
+
+    def test_regenerating_a_day_ignores_old_interpretation_cache(self):
+        import json
+        from dataclasses import replace
+        from unittest.mock import Mock
+
+        from xiaomao.daily_jobs import _hash, summarize_projects
+        from xiaomao.feature_daily import model_packet
+        from xiaomao.store import open_db
+
+        bundle = self._export_bundle()
+        project, = bundle["projects"]
+        packet = model_packet(bundle, project)
+        stale = {"accepted": 1, "records": [{
+            "record_id": "feature:old-export", "feature_name": "笔记导出",
+            "after": "笔记可以导出为逗号分隔的文件。", "impact": "",
+            "progress": "continuing", "today": True, "priority": 3, "variant": "",
+            "interpretation": "model_static", "unit_ids": [unit["unit_id"] for unit in packet["units"]],
+        }]}
+        old_text = render_plain_summary(bundle, {"notes": stale}, supplemented=True)
+        self.assertIn("笔记可以导出为逗号分隔的文件  🟡 未提交", old_text)
+
+        for version in ("functional-daily-v8-reader-detail", "functional-daily-v9-removal-evidence"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as home:
+                cfg = replace(self.cfg, home=home)
+                model = cfg.depth_candidates[0] if cfg.depth_candidates else cfg.lite_model
+                key = _hash([version, model, cfg.depth_candidates, bundle["scope"], packet])
+                with open_db(Path(home) / "xiaomao.sqlite") as conn:
+                    conn.execute("INSERT INTO daily_model_cache VALUES (?,?)", (key, json.dumps(stale)))
+                client = Mock()
+                client.generate_json.return_value = {"json": {"records": []}}
+
+                notes = summarize_projects(cfg, bundle, client)
+                text = render_plain_summary(bundle, notes)
+                self.assertIn("导出时保留笔记标题  🟢 已合并", text)
+                self.assertNotIn("笔记可以导出为逗号分隔的文件", text)
+                client.generate_json.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

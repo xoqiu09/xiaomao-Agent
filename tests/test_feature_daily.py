@@ -181,7 +181,8 @@ class FeatureDailyTests(unittest.TestCase):
         self.scan("2026-10-02T03:00:00+00:00")
         project = self.bundle()["projects"][0]
         packet = model_packet(self.bundle(), project)
-        daily = dict(packet, units=[u for u in packet["units"] if u["path"] == "daily.py"])
+        daily = dict(packet, units=[u for u in packet["units"]
+                                   if u["path"] == "daily.py" and not u["ongoing_only"]])
         good = response(daily, "汇总全天的工作变化。")["json"]
         result = validate_records(project, packet, good)
         self.assertEqual(result["accepted"], 1)

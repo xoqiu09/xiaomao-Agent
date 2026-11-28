@@ -88,11 +88,21 @@ def recent_bundles(conn, cfg, *, days: int, until: str) -> list[dict]:
     return records
 
 
-def _matches(project: dict, wanted: str | None) -> bool:
-    if not wanted:
-        return True
-    wanted = wanted.casefold()
-    return wanted in {str(project.get("project_id", "")).casefold(), str(project.get("display_name", "")).casefold()}
+def _resolve_project_id(cfg, bundles: list[dict], wanted: str) -> str | None:
+    candidates = [(p.project_id, p.display_name) for p in cfg.projects]
+    # Stored windows can include projects discovered under the personal roots.
+    candidates += [(p["project_id"], p["display_name"])
+                   for bundle in reversed(bundles) for p in bundle["projects"]]
+    if any(project_id == wanted for project_id, _ in candidates):
+        return wanted
+    for project_id, name in candidates:
+        if name == wanted:
+            return project_id
+    folded = wanted.casefold()
+    for project_id, _ in candidates:
+        if project_id.casefold() == folded:
+            return project_id
+    return next((project_id for project_id, name in candidates if name.casefold() == folded), None)
 
 
 def project_facts(project: dict) -> dict:
@@ -138,14 +148,15 @@ def project_status(project: dict, *, previously_pushed: bool = False) -> dict | 
 
 
 def build_packet(bundles: list[dict], project: str | None = None) -> list[dict]:
-    """Per-day facts the model may use; oldest days drop first to fit the budget."""
+    """Per-day facts filtered by the resolved project ID; oldest days drop first."""
     from xiaomao.delivery_state import preserve_window_delivery
     from xiaomao.feature_render import plain_next_steps, plain_summary_line
     days = []
     previously_pushed = set()
     for bundle in bundles:
-        chosen = [dict(p) for p in bundle["projects"] if _matches(p, project)]
-        if project and not chosen:
+        chosen = [dict(p) for p in bundle["projects"]
+                  if project is None or p["project_id"] == project or project in p.get("aliases", ())]
+        if project is not None and not chosen:
             continue
         scoped = dict(bundle, projects=chosen)
         preserve_window_delivery(scoped)
@@ -173,7 +184,7 @@ def project_briefs(cfg, project: str | None = None) -> list[dict]:
     from xiaomao.menu_briefing import contains_file_path
     briefs = []
     for spec in cfg.projects:
-        if not _matches({"project_id": spec.project_id, "display_name": spec.display_name}, project):
+        if project is not None and spec.project_id != project:
             continue
         cache = read_cached_digest(cfg, spec)
         if cache is None:
@@ -291,11 +302,13 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
         if infer_paused(conn):
             err.write("推理已暂停，没有调用模型。可用 xiaomao resume infer 恢复。\n")
             return 3
-        records = build_packet(recent_bundles(conn, cfg, days=days, until=today), ns.project)
+        bundles = recent_bundles(conn, cfg, days=days, until=today)
+    project_id = _resolve_project_id(cfg, bundles, ns.project) if ns.project else None
+    records = build_packet(bundles, project_id) if project_id is not None or not ns.project else []
     if ns.project and not records:
         err.write(f"最近 {days} 天还没有这个项目的晚报记录。\n")
         return 2
-    packet, labels, handoffs_unavailable = material(cfg, records, ns.project)
+    packet, labels, handoffs_unavailable = material(cfg, records, project_id)
     started = None
     if client_factory is None:
         from xiaomao.ollama_runtime import ModelHostError

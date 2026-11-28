@@ -123,6 +123,34 @@ class ReportCliTests(unittest.TestCase):
                     self.assertIn("本报告由规则程序生成", body)
                     self.assertNotIn("笔记已上线", body)
 
+    def test_handoff_discards_interpretation_without_evidence(self) -> None:
+        home = self._home()
+        (home.parent / "repo" / "draft.txt").write_text("unfinished note\n", encoding="utf-8")
+        claim = "笔记支持按作者搜索"
+        client = Mock()
+        client.generate_json.return_value = {
+            "json": {"interpretations": [{"text": claim, "evidence_ids": []}],
+                     "suggestions": [], "unknowns": []},
+        }
+        args = ["--home", str(home)]
+        with (
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            patch("xiaomao.ollama_runtime.api_get", return_value={}),
+            patch("xiaomao.eval_runner.host_pressure", return_value={}),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(args + ["scan", "--project", "website"]), 0)
+            self.assertEqual(main(args + ["handoff", "--project", "website", "--with-model"]), 0)
+        client.generate_json.assert_called_once()
+        path = next((home / "reports" / "handoff").glob("website-*.txt"))
+        body = path.read_text(encoding="utf-8")
+        self.assertIn("untracked 1", body)
+        self.assertIn("untracked: draft.txt", body)
+        self.assertNotIn(claim, body)
+        self.assertNotIn("校验：pass", body)
+
     def test_handoff_reuse_preserves_model_unknowns(self) -> None:
         home = self._home()
         limit = "离线导出能否恢复原有笔记，还没有验证"
@@ -311,12 +339,13 @@ class ReportCliTests(unittest.TestCase):
         from xiaomao.store import latest_summary_for_range
 
         db = Path(self.enterContext(tempfile.TemporaryDirectory())) / "xiaomao.sqlite"
-        facts = {"project_id": "website"}
+        facts = {"project_id": "website", "evidence_ids": ["worktree:website-main"]}
         text = "可继续检查离线导出"
         with open_db(db) as conn:
             record_summary_row(
                 conn, facts=facts, model="fixture",
-                result={"ok": True, "payload": {"interpretations": [{"text": text}]}},
+                result={"ok": True, "payload": {"interpretations": [
+                    {"text": text, "evidence_ids": ["worktree:website-main"]}]}},
             )
             if any(column[1] == "unknowns_json" for column in conn.execute("PRAGMA table_info(summaries)")):
                 conn.execute("ALTER TABLE summaries DROP COLUMN unknowns_json")
