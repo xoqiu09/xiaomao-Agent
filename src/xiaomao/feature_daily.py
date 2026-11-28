@@ -65,7 +65,8 @@ def project_units(project):
     result = []
     contexts = project.get("feature_contexts", {})
     sources = [("commit", c) for c in project["commits"]]
-    sources += [("activity", a) for a in project["activity"] if not a.get("covered_by_commits")
+    sources += [("activity", a) for a in project["activity"] if a.get("kind") != "branch_change"
+                and not a.get("covered_by_commits")
                 and not a.get("followed_by_restore")]
     sources += [("ongoing", s) for s in project["ongoing"]]
     for origin, event in sources:

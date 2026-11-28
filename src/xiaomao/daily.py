@@ -67,14 +67,19 @@ def _activity(previous, state, row):
     if state.get("gone"):
         kind = "gone"
     elif not paths:
-        if previous.get("head") == state.get("head") and previous.get("branch") == state.get("branch"):
+        if previous.get("head") != state.get("head"):
+            kind = "head_change"
+        elif any(previous.get(key, 0) != state.get(key, 0) for key in ("staged", "unstaged", "untracked")):
+            kind = "workspace"
+        elif previous.get("branch") != state.get("branch"):
+            kind = "branch_change"
+        else:
             return None
-        kind = "head_change"
     elif before and not after:
         kind = "restored" if previous.get("head") == state.get("head") else "resolved"
     else:
         kind = "workspace"
-    return {
+    event = {
         "evidence_id": row["sample_id"], "tree_id": row["tree_id"], "at": row["at_utc"],
         "sequence": row["sample_order"],
         "kind": kind, "paths": paths,
@@ -85,6 +90,9 @@ def _activity(previous, state, row):
         "head": state.get("head"), "before_head": previous.get("head"),
         "context_version": state.get("feature_context", {}).get("version"),
     }
+    if kind == "branch_change":
+        event.update(before_branch=previous.get("branch"), branch=state.get("branch"))
+    return event
 
 
 def _group(project, repo_id):
@@ -259,7 +267,7 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
         group["commits"].sort(key=lambda c: (c["effective_at"], c["sha"]))
         group["activity"].sort(key=_event_order)
         group["evidence_ids"] = [x["evidence_id"] for x in group["commits"] + group["activity"] + group["ongoing"]]
-        group["changed"] = bool(group["commits"] or group["activity"])
+        group["changed"] = bool(group["commits"]) or any(a["kind"] != "branch_change" for a in group["activity"])
         group["gaps"] = list(dict.fromkeys(group["gaps"]))
         group["limitations"] = list(dict.fromkeys(group["limitations"]))
         used_contexts = {e.get("context_version") for e in group["commits"] + group["activity"] + group["ongoing"]}
@@ -314,7 +322,8 @@ def project_lines(project) -> list[str]:
     uncovered = [a for a in project["activity"] if not a["covered_by_commits"] and not a.get("followed_by_restore")]
     kinds = {"workspace": "工作区修改", "restored": "观察到修改后恢复至原提交",
              "resolved": "工作区差异消失，HEAD 已变化", "gone": "工作树已消失",
-             "head_change": "分支或提交指针变化，具体切换或同步操作未知"}
+             "head_change": "分支或提交指针变化，具体切换或同步操作未知",
+             "branch_change": "同一提交上的分支切换"}
     seen = set()
     for item in uncovered:
         identity = (item["kind"], item["tree_id"], tuple(item["paths"]))
@@ -322,7 +331,10 @@ def project_lines(project) -> list[str]:
             continue
         seen.add(identity)
         detail = "、".join(item["paths"][:5]) or (item["head"] or "unborn")[:12]
-        lines.append(f"{kinds[item['kind']]}：{item['tree_id']} · " + detail)
+        label = kinds[item["kind"]]
+        if item["kind"] == "branch_change" and item["head"] is None:
+            label = "首次提交前的分支切换"
+        lines.append(f"{label}：{item['tree_id']} · " + detail)
     return lines
 
 
@@ -379,15 +391,15 @@ def render_evidence(bundle: dict, notes: dict | None = None) -> str:
     tz = ZoneInfo(window["timezone"])
     start = datetime.fromisoformat(window["start"]).astimezone(tz)
     end = datetime.fromisoformat(window["end"]).astimezone(tz)
-    changed = sum(p["changed"] for p in bundle["projects"])
+    observed = sum(bool(p["commits"] or p["activity"]) for p in bundle["projects"])
     lines = [f"小猫日报 {window['date']}", f"时区：{window['timezone']}",
              f"窗口：{start.isoformat()} → {end.isoformat()}（左闭右开）",
              f"生成时间（UTC）：{bundle['generated_at']}",
              f"覆盖：{bundle['coverage']}" + (" · 截止时间前预览" if bundle["preview"] else ""),
              "", "今日总览", "--------",
-             f"{len(bundle['projects'])} 个项目，{changed} 个项目有新增观察。",
+             f"{len(bundle['projects'])} 个项目，{observed} 个项目有新增观察。",
              "只报告有证据的个人项目变化。"]
-    if not changed:
+    if not observed:
         lines.append("已覆盖部分未记录到新变化；遗留修改见下方，不据此推断没有工作。")
     lines.extend(["", "各项目变化", "--------"])
     for project in bundle["projects"]:
@@ -422,7 +434,12 @@ def render_evidence(bundle: dict, notes: dict | None = None) -> str:
         if project.get("delivery_state"):
             lines.extend(delivery_lines(project["delivery_state"]))
         for event in project["activity"]:
-            lines.append(f"  [{event['evidence_id']}] {event['at']} · {event['kind']} · " + "、".join(event["paths"]))
+            detail = "、".join(event["paths"])
+            if event["kind"] == "branch_change":
+                before, after = ((event[key] or "detached").removeprefix("refs/heads/")
+                                 for key in ("before_branch", "branch"))
+                detail = f"{before} → {after}"
+            lines.append(f"  [{event['evidence_id']}] {event['at']} · {event['kind']} · {detail}")
             if event["covered_by_commits"]:
                 lines.append("    已合并叙述至提交：" + "、".join(event["covered_by_commits"]))
             if event.get("followed_by_restore"):
