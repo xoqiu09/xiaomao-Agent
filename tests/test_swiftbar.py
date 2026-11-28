@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from xiaomao.config import load_config
+from xiaomao.menu_briefing import render_menu_briefing
+from xiaomao.report_access import bind_report
 from xiaomao.store import SCHEMA, utc_now
 from xiaomao.swiftbar import (
     STALE_AFTER_S,
@@ -216,6 +219,58 @@ class SwiftbarTests(unittest.TestCase):
         self.assertIn("只读 · 不扫描业务仓 · 不加载模型", menu)
         self.assertNotIn("--with-model", menu)
         self.assertNotIn("xiaomao scan", menu)
+
+    def test_menu_dates_previous_days_briefing(self) -> None:
+        home = _write_home(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        cfg = load_config(home)
+        now = datetime(2026, 11, 27, 9, tzinfo=TZ)
+        _insert_scan(home, finished=now - timedelta(minutes=2))
+        briefings = home / "reports" / "briefing"
+        briefings.mkdir()
+        project_lines = ["今天没事：新增搜索", "笔记：今天有提交，新增索引"]
+        next_step = "今天没事：推送本地的 1 个提交"
+        text = render_menu_briefing(
+            ["今天 2 个项目有进展", *project_lines, f"明天先：{next_step}"], [], model_used=False,
+        )
+        cases = (
+            ("2026-11-26", "11 月 26 日晚报", "当天 2 个项目有进展", "次日建议"),
+            ("2026-11-27", "今天", "今天 2 个项目有进展", "明天先"),
+        )
+        for day, heading, summary, advice in cases:
+            with self.subTest(day=day):
+                bundle = {"window": {"date": day}, "schema": "fixture", "evidence_hash": "fixture",
+                          "coverage": {}, "projects": [], "preview": False}
+                daily = home / "reports" / "daily" / f"{day}.txt"
+                daily.write_text("小猫晚报\n", encoding="utf-8")
+                bind_report(daily, "小猫晚报\n", cfg, "daily", daily_bundle=bundle)
+                briefing = briefings / f"menu-{day}.txt"
+                briefing.write_text(text, encoding="utf-8")
+                bind_report(briefing, text, cfg, "briefing", daily_bundle=bundle)
+                lines = render_menu(home, now=now).splitlines()
+                self.assertEqual(lines[2:7], [
+                    heading, f"-- {summary}", *(f"-- {line}" for line in project_lines), f"-- {advice}：{next_step}",
+                ])
+
+    def test_menu_rejects_briefing_renamed_to_today(self) -> None:
+        home = _write_home(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        cfg = load_config(home)
+        now = datetime(2026, 11, 27, 9, tzinfo=TZ)
+        _insert_scan(home, finished=now - timedelta(minutes=2))
+        bundle = {"window": {"date": "2026-11-26"}, "schema": "fixture", "evidence_hash": "fixture",
+                  "coverage": {}, "projects": [], "preview": False}
+        daily = home / "reports" / "daily" / "2026-11-26.txt"
+        daily.write_text("小猫晚报\n", encoding="utf-8")
+        bind_report(daily, "小猫晚报\n", cfg, "daily", daily_bundle=bundle)
+
+        briefing = home / "reports" / "briefing" / "menu-2026-11-27.txt"
+        briefing.parent.mkdir()
+        text = render_menu_briefing(["今天 1 个项目有进展", "笔记：新增搜索"], [], model_used=False)
+        briefing.write_text(text, encoding="utf-8")
+        bind_report(briefing, text, cfg, "briefing", daily_bundle=bundle)
+
+        lines = render_menu(home, now=now).splitlines()
+        self.assertIn("请重新生成日报", lines[3])
+        self.assertNotIn("-- 笔记：新增搜索", lines)
 
     def test_missing_handoff_has_no_terminal_button(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

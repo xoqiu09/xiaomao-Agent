@@ -212,7 +212,10 @@ def _maybe_model_note(
         if reason.startswith("dedup:"):
             prior = latest_summary_for_range(conn, pid, evidence_snapshot_key(facts))
             if prior is not None:
-                return reuse_summary_note(prior), prior["validation_status"] == "pass"
+                note = reuse_summary_note(prior, facts)
+                if note is None:
+                    return degrade_note("已保存的解读未通过当前校验"), False
+                return note, prior["validation_status"] == "pass"
         if reason == "infer_paused":
             return degrade_note("推理已暂停"), False
         if reason == "no_new_evidence":

@@ -69,6 +69,8 @@ def read_bound_report(path: Path, home: Path, cfg: AppConfig, kind: str, project
     if kind == "briefing" and meta.get("window"):
         from datetime import date
         day = date.fromisoformat(meta["window"]["date"]).isoformat()
+        if path.name != f"menu-{day}.txt":
+            raise ValueError("菜单摘要文件名与日报日期不一致")
         main_path = home / "reports/daily" / (day + ".txt")
         read_bound_report(main_path, home, cfg, "daily")
         main = json.loads(_read_file(main_path.with_suffix(".json"), main_path.parent, 128 * 1024))

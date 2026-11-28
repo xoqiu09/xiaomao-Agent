@@ -7,6 +7,7 @@ status fields are validated here; failure degrades to a rule-based note.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from xiaomao.config import AppConfig
@@ -182,15 +183,13 @@ def _as_list(value: Any) -> list:
 
 def _is_assertive_completion(text: str) -> bool:
     """True when the text claims a completion, not merely mentions it in a denial."""
-    if not text:
-        return False
-    lowered = text.lower()
-    hits = [tok for tok in FORBIDDEN_COMPLETIONS if tok in text or tok in lowered]
-    if not hits:
-        return False
-    if any(marker in text or marker in lowered for marker in _NEGATION_MARKERS):
-        return False
-    return True
+    boundaries = r"[。！？；，,!?;\n]+|\.(?=\s|$)|(?<!不)但(?:是)?|不过|然而|可是|\b(?:but|however)\b"
+    for clause in re.split(boundaries, text.lower()):
+        if any(marker in clause for marker in _NEGATION_MARKERS):
+            continue
+        if any(token.lower() in clause for token in FORBIDDEN_COMPLETIONS):
+            return True
+    return False
 
 
 def validate_model_json(payload: dict[str, Any], facts: dict[str, Any]) -> list[str]:
@@ -203,7 +202,7 @@ def validate_model_json(payload: dict[str, Any], facts: dict[str, Any]) -> list[
         if not isinstance(payload[key], list):
             errors.append(f"type:{key}")
     allowed = known
-    for section in ("interpretations", "suggestions"):
+    for section in ("interpretations", "suggestions", "unknowns"):
         for item in _as_list(payload.get(section)):
             if not isinstance(item, dict) or not isinstance(item.get("text"), str):
                 errors.append(f"item:{section}")
@@ -213,7 +212,7 @@ def validate_model_json(payload: dict[str, Any], facts: dict[str, Any]) -> list[
                 errors.append("secret_in_output")
             if _is_assertive_completion(text):
                 if facts.get("test_status") == "unknown" or facts.get("deploy_status") == "unknown":
-                    errors.append(f"unwarranted_completion:{text[:80]}")
+                    errors.append("unwarranted_completion")
             ids = item.get("evidence_ids") or []
             if not isinstance(ids, list):
                 errors.append("evidence_ids_type")

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import chdir, redirect_stdout
+from itertools import product
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -70,6 +71,54 @@ class ReportCliTests(unittest.TestCase):
         text = handoffs[0].read_text(encoding="utf-8")
         self.assertIn("unknown", text)
         self.assertIn("约束", text)
+
+    def test_handoff_checks_completion_per_sentence(self) -> None:
+        from xiaomao.config import load_config
+        from xiaomao.ops import record_summary_row
+        from xiaomao.reports import facts_payload
+
+        cases = (
+            ("interpretations", "测试结果未知。笔记已上线。", False),
+            ("interpretations", "测试结果未知，但笔记已上线。", False),
+            ("interpretations", "没有证据表明测试通过但笔记已上线。", False),
+            ("interpretations", "没有证据表明笔记已上线。", True),
+            ("unknowns", "测试结果未知。笔记已上线。", False),
+            ("unknowns", "没有证据表明笔记已上线。", True),
+        )
+        for (section, model_text, accepted), cached in product(cases, (False, True)):
+            if cached and section == "unknowns":
+                continue  # The cache stores only interpretations and suggestions.
+            with self.subTest(section=section, model_text=model_text, cached=cached):
+                home = self._home()
+                payload = {"interpretations": [], "suggestions": [], "unknowns": []}
+                item = {"text": model_text}
+                if section == "interpretations":
+                    item["evidence_ids"] = ["worktree:website-main"]
+                payload[section].append(item)
+                if cached:
+                    with open_db(home / "xiaomao.sqlite") as conn:
+                        facts = facts_payload(load_config(home), conn, "website")
+                        record_summary_row(conn, facts=facts, result={"ok": True, "payload": payload}, model="fixture")
+                client = Mock()
+                client.generate_json.return_value = {"json": payload}
+                with (
+                    patch("xiaomao.ollama_runtime.models_dir_allowed"),
+                    patch("xiaomao.ollama_runtime.inspect_running", return_value={"reachable": True}),
+                    patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+                    patch("xiaomao.ollama_runtime.api_get", return_value={}),
+                    patch("xiaomao.eval_runner.host_pressure", return_value={}),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(main(["--home", str(home), "handoff", "--project", "website", "--with-model"]), 0)
+                self.assertEqual(client.generate_json.call_count, 0 if cached else 1)
+                path = next((home / "reports" / "handoff").glob("website-*.txt"))
+                body = path.read_text(encoding="utf-8")
+                self.assertEqual("校验：pass" in body, accepted)
+                if accepted:
+                    self.assertIn(model_text, body)
+                else:
+                    self.assertIn("本报告由规则程序生成", body)
+                    self.assertNotIn("笔记已上线", body)
 
     def test_facts_payload_includes_worktree_evidence_ids(self) -> None:
         from xiaomao.config import load_config

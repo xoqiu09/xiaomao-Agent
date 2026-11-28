@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from argparse import Namespace
@@ -134,6 +135,21 @@ class AskTests(unittest.TestCase):
         self.assertIn("xiuqiu-site 做了什么", client.calls[0]["user"])
         self.assertEqual(client.calls[0]["model"], self.cfg.ask_model)                  # general model by default
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)   # nothing written
+
+    def test_answer_uses_daily_report_when_handoff_library_is_locked(self):
+        library = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        save_config(replace(self.cfg, docs_home=str(library)))
+        self.addCleanup(save_config, self.cfg)
+        with patch("xiaomao.documents.DocumentStore.list", side_effect=sqlite3.OperationalError("database is locked")):
+            code, out, err, client = self.ask("那天的晚报怎么说")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(len(client.calls), 1)
+        sent = json.loads(client.calls[0]["user"])
+        self.assertEqual([record["date"] for record in sent["records"]], ["2026-10-02"])
+        self.assertEqual(sent["handoffs"], [])
+        self.assertIn("依据：10月2日的晚报", out)
+        self.assertNotIn("交接《", out)
+        self.assertIn("本次没有读到交接文档", out)
 
     def test_answer_without_valid_days_is_not_shown(self):
         code, out, err, _ = self.ask(reply={"answer": "做了很多。", "sources": ["2026-09-01"],

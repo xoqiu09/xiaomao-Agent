@@ -12,6 +12,7 @@ Nothing is written to the database and no notification is sent.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from datetime import date as Date, timedelta
 from pathlib import Path
@@ -189,16 +190,22 @@ def recent_handoffs(cfg) -> list[dict]:
     return handoffs
 
 
-def material(cfg, days: list[dict], project: str | None) -> tuple[dict, dict]:
-    """The model's input and a label for every source id it may cite."""
+def material(cfg, days: list[dict], project: str | None) -> tuple[dict, dict, bool]:
+    """The model's input, citation labels, and whether the handoff library failed."""
     packet = {"records": days, "project_briefs": project_briefs(cfg, project),
-              "handoffs": [] if project else recent_handoffs(cfg)}
+              "handoffs": []}
+    handoffs_unavailable = False
+    if not project:
+        try:
+            packet["handoffs"] = recent_handoffs(cfg)
+        except sqlite3.Error:
+            handoffs_unavailable = True
     while packet["handoffs"] and len(json.dumps(packet, ensure_ascii=False)) > PACKET_CHAR_BUDGET:
         packet["handoffs"].pop()
     labels = {d["date"]: f"{int(d['date'][5:7])}月{int(d['date'][8:10])}日的晚报" for d in days}
     labels.update({b["source"]: f"{b['project']} 的项目说明" for b in packet["project_briefs"]})
     labels.update({h["source"]: f"交接《{h['title']}》" for h in packet["handoffs"]})
-    return packet, labels
+    return packet, labels, handoffs_unavailable
 
 
 def validated(result: dict | None, sources: set[str]) -> dict | None:
@@ -275,7 +282,7 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
     if ns.project and not records:
         err.write(f"最近 {days} 天还没有这个项目的晚报记录。\n")
         return 2
-    packet, labels = material(cfg, records, ns.project)
+    packet, labels, handoffs_unavailable = material(cfg, records, ns.project)
     started = None
     if client_factory is None:
         from xiaomao.ollama_runtime import ModelHostError
@@ -299,6 +306,8 @@ def ask_command(ns, home: Path, *, client_factory=None, today=None, out=sys.stdo
         err.write(result["error"] + "。可以看晚报：xiaomao latest daily --print\n")
         return 3
     out.write(format_answer(result))
+    if handoffs_unavailable:
+        out.write("\n本次没有读到交接文档。\n")
     return 0
 
 

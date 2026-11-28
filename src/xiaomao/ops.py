@@ -277,8 +277,8 @@ def record_summary_row(
     return sid
 
 
-def reuse_summary_note(row) -> str:
-    from xiaomao.summarize import format_model_note
+def reuse_summary_note(row, facts: dict[str, Any]) -> str | None:
+    from xiaomao.summarize import format_model_note, validate_model_json
 
     try:
         interpretations = json.loads(row["interpretations_json"] or "[]")
@@ -290,6 +290,8 @@ def reuse_summary_note(row) -> str:
         "suggestions": suggestions,
         "unknowns": [],
     }
+    if validate_model_json(payload, facts):
+        return None
     return format_model_note(
         payload,
         model=row["model_identifier"] or "",
