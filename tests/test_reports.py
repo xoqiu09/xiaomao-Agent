@@ -256,6 +256,28 @@ class SummarizeTests(unittest.TestCase):
         ):
             self.assertIn(needed, cats)
 
+    def test_eval_usable_count_requires_nonblank_model_content(self) -> None:
+        cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        sample = next(sample for sample in samples() if sample.sample_id == "zh-summary-dirty")
+        cases = (
+            ("empty", {}, 0),
+            ("whitespace only", {"interpretations": [{"text": " \n\t", "evidence_ids": ["ev_unstaged_1"]}]}, 0),
+            ("evidence-backed answer", {"interpretations": [{
+                "text": "两个文件有未暂存修改，另有一份未跟踪的笔记。", "evidence_ids": ["ev_unstaged_1"],
+            }]}, 1),
+            ("states what is missing", {"unknowns": [{"text": "记录只列出文件名，缺少具体改动内容。"}]}, 1),
+        )
+        client = Mock()
+        with patch("xiaomao.eval_runner.host_pressure", return_value={}):
+            for label, content, expected in cases:
+                with self.subTest(label=label):
+                    client.generate_json.return_value = {"json": {
+                        "interpretations": [], "suggestions": [], "unknowns": [], **content,
+                    }}
+                    report = run_eval(cfg, client=client, model=cfg.ask_model, selected=[sample])
+                    self.assertEqual(report["ok"], 1)
+                    self.assertEqual(report["usable"], expected)
+
     def test_eval_counts_sample_specific_forbidden_claims(self) -> None:
         cfg = default_config(Path(self.enterContext(tempfile.TemporaryDirectory())))
         selected = {sample.sample_id: sample for sample in samples()}

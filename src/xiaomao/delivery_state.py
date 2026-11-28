@@ -17,6 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from xiaomao.git_readonly import GitReadError, run_git
+from xiaomao.inventory import metadata
 
 ORDER = ("uncommitted", "local", "pushed", "merged")
 LABELS = {"uncommitted": "🟡 未提交", "local": "🟠 仅本机", "pushed": "🔵 已推送", "merged": "🟢 已合并"}
@@ -129,43 +130,65 @@ def annotate_project(project: dict, now: datetime | None = None) -> dict:
         info["errors"].append("no_live_tree")
         project["delivery_state"] = info
         return info
-    try:
-        view = remote_view(Path(live[0]["path"]))
-    except GitReadError:
-        info["errors"].append("remote_view_unavailable")
+    paths, copies, copy_for = {}, {}, {}
+    for tree in live:
+        tree_id = tree["tree_id"]
+        try:
+            checkout = metadata(tree["path"])
+        except (GitReadError, OSError, ValueError):
+            info["errors"].append(f"repository_identity_unavailable:{tree_id}")
+            continue
+        if checkout["repo_id"] != project["repo_id"]:
+            info["errors"].append(f"repository_identity_changed:{tree_id}")
+            continue
+        path, common = Path(checkout["path"]), checkout["common_dir"]
+        # Linked worktrees share one set of remote refs, including any read failure.
+        if common not in copies:
+            try:
+                copies[common] = (path, remote_view(path))
+            except GitReadError:
+                info["errors"].append(f"remote_view_unavailable:{tree_id}")
+                copies[common] = None
+        if copies[common] is not None:
+            paths[tree_id] = path
+            copy_for[path] = copies[common]
+    views = sorted((copy for copy in copies.values() if copy is not None), key=lambda copy: copy[0])
+    if not views:
         project["delivery_state"] = info
         return info
-    info.update(has_remote=view["has_remote"], default_ref=view["default_ref"],
-                default_basis=view["default_basis"])
-    paths = {t["tree_id"]: Path(t["path"]) for t in live}
-    commit_paths = {}
+    primary, view = views[0]
+    content_views = [(path, copy_view) for path, copy_view in views if copy_view["default_ref"]]
+    default = content_views[0][1] if content_views else view
+    info.update(has_remote=any(copy_view["has_remote"] for _, copy_view in views),
+                default_ref=default["default_ref"],
+                default_basis=default["default_basis"])
+    checked_copy = {}
     for commit in project["commits"]:
         sha = commit["sha"]
-        tree = next((paths[t] for t in commit.get("tree_ids", []) if t in paths), Path(live[0]["path"]))
+        tree = next((paths[t] for t in commit.get("tree_ids", []) if t in paths), primary)
+        copy_path, copy_view = copy_for[tree]
         try:
-            state = commit_state(tree, sha, view)
+            state = commit_state(copy_path, sha, copy_view)
         except GitReadError:
             state = None
-        if state is None:
-            info["errors"].append(f"commit_state_unavailable:{sha[:12]}")
-        elif state in {"local", "pushed"}:
-            commit_paths[sha] = tree
+        checked_copy[sha] = copy_path
         info["commits"][sha] = state
     unpushed = {}
-    if view["has_remote"]:
+    if info["has_remote"]:
         info["unpushed_incomplete"] = (
             any(not t.get("head") for t in live)
-            or len(live) < sum(not t.get("gone") for t in project["trees"])
+            or len(paths) < sum(not t.get("gone") for t in project["trees"])
         )
         # Reserve each tree's HEAD history before adding candidates from other branches.
         for other_branches in (False, True):
             ref_group = "branches" if other_branches else "head"
             for tree in live:
-                if not tree.get("head"):
+                path = paths.get(tree["tree_id"])
+                if not path or not tree.get("head"):
                     continue
-                path = paths[tree["tree_id"]]
+                _, copy_view = copy_for[path]
                 try:
-                    found = unpushed_commits(path, view, other_branches=other_branches)
+                    found = unpushed_commits(path, copy_view, other_branches=other_branches)
                 except GitReadError:
                     found = None
                 if found is None:
@@ -177,6 +200,27 @@ def annotate_project(project: dict, now: datetime | None = None) -> dict:
                     info["unpushed_incomplete"] = True
                 for sha in found[:MAX_UNPUSHED]:
                     unpushed.setdefault(sha, path)
+    for sha in sorted(info["commits"].keys() | unpushed.keys()):
+        state = info["commits"].get(sha)
+        local_path, _ = copy_for.get(unpushed.get(sha), (None, None))
+        for path, copy_view in views:
+            if state == "merged" or (state == "pushed" and sha not in info["commits"]):
+                break
+            if path in (checked_copy.get(sha), local_path) or not copy_view["has_remote"]:
+                continue
+            try:
+                other = commit_state(path, sha, copy_view)
+            except GitReadError:
+                continue
+            if other is not None and (state is None or ORDER.index(other) > ORDER.index(state)):
+                state = other
+        if state in {"pushed", "merged"}:
+            unpushed.pop(sha, None)
+        if sha in info["commits"]:
+            info["commits"][sha] = state
+    for sha, state in info["commits"].items():
+        if state is None:
+            info["errors"].append(f"commit_state_unavailable:{sha[:12]}")
     by_tree = {}
     for sha, path in unpushed.items():
         by_tree.setdefault(path, []).append(sha)
@@ -192,26 +236,34 @@ def annotate_project(project: dict, now: datetime | None = None) -> dict:
             (stale if sha in times and times[sha] < cutoff else recent)[sha] = path
 
     matched, checked = set(), set()
-    if view["default_ref"]:
+    if content_views:
         # Spend the shared budget on reminders first, then the day's labels and old history.
-        candidates = recent | commit_paths | stale
-        for index, (sha, path) in enumerate(candidates.items()):
-            if index >= MAX_CONTENT_CHECKS:
+        labels = {sha: None for sha, state in info["commits"].items() if state in {"local", "pushed"}}
+        remaining = MAX_CONTENT_CHECKS
+        for sha in recent | labels | stale:
+            available = content_views[:remaining]
+            complete = len(available) == len(content_views)
+            for path, copy_view in available:
+                remaining -= 1
+                try:
+                    merged = merged_by_content(path, sha, copy_view)
+                except GitReadError:
+                    info["errors"].append(f"content_check_unavailable:{sha[:12]}")
+                    complete = False
+                    continue
+                if merged:
+                    matched.add(sha)
+                    if sha in info["commits"]:
+                        info["commits"][sha] = "merged"
+                    break
+            if complete:
+                checked.add(sha)
+            if sha not in matched and len(available) < len(content_views):
                 info["errors"].append("content_check_truncated")
                 break
-            try:
-                merged = merged_by_content(unpushed.get(sha, path), sha, view)
-            except GitReadError:
-                info["errors"].append(f"content_check_unavailable:{sha[:12]}")
-                continue
-            checked.add(sha)
-            if merged:
-                matched.add(sha)
-                if sha in info["commits"]:
-                    info["commits"][sha] = "merged"
     info["merged_by_content"] = sorted(matched)
     for sha in sorted(unpushed.keys() - matched):
-        if view["default_ref"] and sha not in checked:
+        if content_views and sha not in checked:
             info["unpushed_unchecked"].append(sha)
             info["unpushed_incomplete"] |= sha in recent
         else:

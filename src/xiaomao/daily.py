@@ -7,7 +7,7 @@ from datetime import date as Date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from xiaomao.activity import stamp
+from xiaomao.activity import COMMIT_HISTORY_GAP, stamp
 from xiaomao.change_evidence import digest
 from xiaomao.inventory import effective_config, excluded, metadata, scope_key
 from xiaomao.ops import GAP_WARN_AFTER_S
@@ -196,6 +196,8 @@ def build_bundle(cfg, conn, *, date: str, now: datetime | None = None) -> dict:
                 state = json.loads(row["state_json"])
                 if window_start <= row["at_utc"] < horizon and state.get("status") == "ok" and not state.get("gone"):
                     written_trees.add(tree["tree_id"])
+                if window_start <= row["at_utc"] and COMMIT_HISTORY_GAP in state.get("limitations", []):
+                    group["limitations"].append(COMMIT_HISTORY_GAP)
                 context = state.get("feature_context")
                 if context:
                     group["feature_contexts"][context["version"]] = context
