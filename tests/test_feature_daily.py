@@ -108,6 +108,32 @@ class FeatureDailyTests(unittest.TestCase):
         records = feature_records(self.bundle()["projects"][0])
         self.assertEqual({r["feature_name"] for r in records}, {"每日工作总结", "任务恢复"})
 
+    def test_deleted_function_is_attributed_to_its_catalog_feature(self):
+        from xiaomao.feature_context import save_catalog
+        from xiaomao.feature_daily import feature_records
+
+        save_catalog(self.conn, self.cfg, "website", {"purpose": "管理笔记", "features": [
+            {"id": "export", "name": "导出笔记", "symbols": ["export_notes"]},
+            {"id": "print", "name": "打印笔记", "symbols": ["print_notes"]},
+        ]}, at="2026-10-01T12:00:00+00:00")
+        notes_files = {
+            self.repo / "notes.py": "",
+            self.repo / "notes_with_import.py": "import json\n\n\n",
+        }
+        export_function = "def export_notes():\n    return 'exported'\n\n\n"
+        print_function = "def print_notes():\n    return 'printed'\n"
+        for notes, header in notes_files.items():
+            notes.write_text(header + export_function + print_function)
+        git(self.repo, "add", *(notes.name for notes in notes_files))
+        git(self.repo, "commit", "-m", "Add export and print features")
+        self.scan("2026-10-01T13:00:00+00:00")
+
+        for notes, header in notes_files.items():
+            notes.write_text(header + print_function)
+        self.scan("2026-10-02T03:00:00+00:00")
+        records = feature_records(self.bundle()["projects"][0])
+        self.assertEqual({r["feature_name"] for r in records}, {"导出笔记"})
+
     def test_yesterday_dirty_today_only_reports_the_new_delta(self):
         self.catalog()
         (self.repo / "daily.py").write_text("def report():\n    return 'yesterday'\n")

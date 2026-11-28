@@ -361,14 +361,35 @@ class ReportCliTests(unittest.TestCase):
         self.assertEqual(cfg.depth_candidates[0], "qwen3-coder:30b")
         self.assertIn("qwen3.6:35b", cfg.depth_candidates)
 
+    def test_eval_fails_when_no_model_answers_are_usable(self) -> None:
+        home = self._home()
+        buf = io.StringIO()
+        client = Mock()
+        client.generate_json.side_effect = ConnectionRefusedError("fixture model offline")
+        with (
+            patch("xiaomao.ollama_runtime.models_dir_allowed"),
+            patch("xiaomao.ollama_runtime.OllamaClient", return_value=client),
+            redirect_stdout(buf),
+        ):
+            status = main(["--home", str(home), "eval"])
+        payload = json.loads(buf.getvalue())
+        self.assertGreater(payload["n"], 0)
+        self.assertEqual(payload["usable"], 0)
+        self.assertEqual(payload["degraded"], payload["n"])
+        self.assertEqual(payload["serious_factual_errors"], 0)
+        self.assertEqual(len(payload["samples"]), payload["n"])
+        self.assertNotEqual(status, 0)
+
     def test_eval_dry_run_degrades(self) -> None:
         home = self._home()
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with patch("xiaomao.ollama_runtime.OllamaClient") as model_client, redirect_stdout(buf):
             self.assertEqual(main(["--home", str(home), "eval", "--dry-run"]), 0)
+        model_client.assert_not_called()
         payload = json.loads(buf.getvalue())
         self.assertGreaterEqual(payload["n"], 20)
         self.assertEqual(payload["ok"], 0)
+        self.assertEqual(payload["usable"], 0)
         self.assertEqual(payload["degraded"], payload["n"])
 
     def test_pilot_archive_keeps_round_and_restart_starts_fresh(self) -> None:

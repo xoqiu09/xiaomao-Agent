@@ -396,7 +396,7 @@ def cmd_eval(ns: argparse.Namespace) -> int:
     report = run_eval(cfg, client=client, model=model, selected=load_samples())
     json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
-    if report["serious_factual_errors"]:
+    if report["serious_factual_errors"] or (not ns.dry_run and not report["usable"]):
         return 2
     return 0
 

@@ -65,7 +65,12 @@ def capture(before: str, after: str, path: str, *, layer="working") -> dict:
                 truncated = True
                 break
             removed, added = "\n".join(left[i:j]), "\n".join(right[a:b])
-            units.append({"symbol": _symbol(right, a) or _symbol(left, i), "kind": kind,
+            if a == b:
+                declaration = next((n for n in range(i, j) if _DECL.search(left[n])), i)
+                symbol = _symbol(left, declaration)
+            else:
+                symbol = _symbol(right, a) or _symbol(left, i)
+            units.append({"symbol": symbol, "kind": kind,
                           "before": safe_text(removed, 600), "after": safe_text(added, 600),
                           "context_before": _context(left, i), "context_after": _context(right, a),
                           "layer": layer, "basis": "source_diff",
