@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import base64
+import re
 import shlex
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -427,19 +428,20 @@ def _briefing_sections(
     *,
     now: datetime | None = None,
     cfg=None,
-) -> tuple[list[str], list[str], bool]:
+) -> tuple[list[str], list[str], bool, date | None]:
     """Prefer the already-written menu briefing; else reconstruct from facts."""
     path = latest_menu_briefing(home)
     if path is not None and cfg is not None:
         try:
             from xiaomao.report_access import read_bound_report
             text = read_bound_report(path, home, cfg, "briefing")
+            briefing_day = date.fromisoformat(path.stem.removeprefix("menu-"))
         except (OSError, ValueError, KeyError, TypeError):
-            return ["菜单摘要和当前项目对不上，请重新生成日报。"], [], False
+            return ["菜单摘要和当前项目对不上，请重新生成日报。"], [], False, None
         if text:
             today, idle, model_used = parse_menu_briefing(text)
             if today or idle:
-                return today, idle, model_used
+                return today, idle, model_used, briefing_day
     facts_map = _facts_by_project(state)
     today: list[str] = []
     idle: list[str] = []
@@ -450,7 +452,7 @@ def _briefing_sections(
             today.append(sentence)
         elif section == "idle":
             idle.append(sentence)
-    return today, idle, False
+    return today, idle, False, None
 
 
 def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str:
@@ -486,7 +488,23 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     alerts = _alerts(state, stale=stale)
     quiet_projects = {p.project_id for p in projects if p.menu_hide_dirty}
     dirty = _dirty_inventory(state, quiet_projects)
-    today, idle, model_used = _briefing_sections(home, projects, state, now=now_utc, cfg=cfg)
+    today, idle, model_used, briefing_day = _briefing_sections(home, projects, state, now=now_utc, cfg=cfg)
+    heading = "今天"
+    if briefing_day is not None and briefing_day != now_local.date():
+        year = f"{briefing_day.year} 年 " if briefing_day.year != now_local.year else ""
+        heading = f"{year}{briefing_day.month} 月 {briefing_day.day} 日晚报"
+        if not today:
+            today = ["当天没有新的模块变化。"]
+        elif re.match(r"今天(?: \d+ 个项目有进展|没有新的(?:进展|模块变化)|没读到.+的进度)(?:[，。]|$)",
+                      today[0]):
+            today[0] = "当天" + today[0][2:]
+        # Only the generated next step uses one of these action phrases as a full line.
+        if re.fullmatch(
+            r"明天先：(?:.+：)?(?:推送本地的(?:至少)? \d+ 个提交|"
+            r"\d+ 处未提交改动，(?:建议分批提交|记得提交)|已推送的分支还没合进 \S+)",
+            today[-1],
+        ):
+            today[-1] = "次日建议：" + today[-1].removeprefix("明天先：")
     daily = latest_daily(home)
     reports = reports_dir(home)
     scan_outcome = _row_get(last_run, "outcome")
@@ -507,7 +525,7 @@ def render_menu(home: Path | None = None, *, now: datetime | None = None) -> str
     lines = [
         _title_line(title, image_b64),
         "---",
-        "今天",
+        heading,
     ]
     if today:
         lines.extend(f"-- {_escape(item)}" for item in today)
