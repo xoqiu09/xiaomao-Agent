@@ -248,6 +248,117 @@ class DailyRegressionTests(unittest.TestCase):
         self.assertEqual(project["commits"], [])
         self.assertTrue(project["gaps"])
 
+    def test_replaced_checkout_resumes_recording_after_losing_all_previous_commits(self):
+        remote = "https://github.com/xoqiu09/fixture.git"
+        git(self.repo, "remote", "add", "origin", remote)
+        old = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.scan("2026-10-01T13:25:00+00:00")
+
+        self.repo.rename(self.root / "original")
+        init_repo(self.repo, initial_commit=False)
+        git(self.repo, "remote", "add", "origin", remote)
+        git(self.repo, "commit", "--allow-empty", "-m", "Replacement starting point")
+        self.assertNotEqual(git(self.repo, "cat-file", "-e", old, check=False).returncode, 0)
+        self.scan("2026-10-02T03:00:00+00:00")
+
+        git(self.repo, "commit", "--allow-empty", "-m", "New work after replacement")
+        new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.scan("2026-10-02T03:05:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        self.assertEqual([commit["sha"] for commit in project["commits"]], [new])
+        self.assertIn("commit_history_unavailable: missing previous commit", project["limitations"])
+
+    def test_replaced_checkout_keeps_the_previous_commits_it_can_still_read(self):
+        remote = "https://github.com/xoqiu09/fixture.git"
+        git(self.repo, "remote", "add", "origin", remote)
+        git(self.repo, "switch", "-c", "old-side-branch")
+        git(self.repo, "commit", "--allow-empty", "-m", "Old side work")
+        lost = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        git(self.repo, "switch", "main")
+        self.scan("2026-10-01T13:25:00+00:00")
+
+        original = self.root / "original"
+        self.repo.rename(original)
+        git(self.root, "clone", "--no-local", "--single-branch", str(original), str(self.repo))
+        git(self.repo, "remote", "set-url", "origin", remote)
+        self.assertNotEqual(git(self.repo, "cat-file", "-e", lost, check=False).returncode, 0)
+        git(self.repo, "commit", "--allow-empty", "-m", "New main work")
+        new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.scan("2026-10-02T03:00:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        self.assertEqual([commit["sha"] for commit in project["commits"]], [new])
+
+    def test_missing_previous_commit_is_recognized_with_a_git_warning(self):
+        from xiaomao.git_readonly import run_git
+
+        old = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        remote = "https://github.com/xoqiu09/fixture.git"
+        git(self.repo, "remote", "add", "origin", remote)
+        self.scan("2026-10-01T13:25:00+00:00")
+
+        self.repo.rename(self.root / "original")
+        init_repo(self.repo, initial_commit=False)
+        git(self.repo, "remote", "add", "origin", remote)
+        git(self.repo, "commit", "--allow-empty", "-m", "Replacement starting point")
+
+        def warn_on_missing_check(path, *args, **kwargs):
+            result = run_git(path, *args, **kwargs)
+            if args[:3] == ("rev-list", "--no-walk", "--missing=print"):
+                self.assertEqual(result.returncode, 0)
+                self.assertIn(f"?{old}", result.stdout.splitlines())
+                result.stderr += "warning: could not resolve a temporary directory\n"
+            return result
+
+        with patch("xiaomao.activity.run_git", side_effect=warn_on_missing_check):
+            self.scan("2026-10-02T03:00:00+00:00")
+            git(self.repo, "commit", "--allow-empty", "-m", "New work after replacement")
+            new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+            self.scan("2026-10-02T03:05:00+00:00")
+
+        project = self.bundle()["projects"][0]
+        self.assertEqual([commit["sha"] for commit in project["commits"]], [new])
+
+    def test_empty_replacement_does_not_count_restored_history_as_new_work(self):
+        remote = "https://github.com/xoqiu09/fixture.git"
+        git(self.repo, "remote", "add", "origin", remote)
+        old = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.scan("2026-10-01T13:25:00+00:00")
+
+        original = self.root / "original"
+        self.repo.rename(original)
+        init_repo(self.repo, initial_commit=False)
+        git(self.repo, "remote", "add", "origin", remote)
+        self.scan("2026-10-02T03:00:00+00:00")
+        git(self.repo, "fetch", str(original), "main")
+        git(self.repo, "reset", "--hard", "FETCH_HEAD")
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD").stdout.strip(), old)
+        self.scan("2026-10-02T03:05:00+00:00")
+
+        self.assertEqual([commit["sha"] for commit in self.bundle()["projects"][0]["commits"]], [])
+
+    def test_temporary_history_read_failure_keeps_the_previous_commits_for_retry(self):
+        from subprocess import CompletedProcess
+        from xiaomao.git_readonly import run_git
+
+        self.scan("2026-10-01T13:25:00+00:00")
+        git(self.repo, "commit", "--allow-empty", "-m", "Work to recover on retry")
+        new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+        def fail_history_walk(path, *args, **kwargs):
+            if args[:2] == ("rev-list", "--reverse"):
+                return CompletedProcess(args, 128, "", "temporary read failure")
+            return run_git(path, *args, **kwargs)
+
+        with patch("xiaomao.activity.run_git", side_effect=fail_history_walk):
+            self.scan("2026-10-02T03:00:00+00:00")
+        self.assertEqual(self.bundle()["projects"][0]["commits"], [])
+
+        self.scan("2026-10-02T03:05:00+00:00")
+        project = self.bundle()["projects"][0]
+        self.assertEqual([commit["sha"] for commit in project["commits"]], [new])
+
     def test_cutoff_boundary_and_late_work_go_to_next_day(self):
         from xiaomao.daily import report_window
         start, end = report_window(self.cfg, "2026-10-02")

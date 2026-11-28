@@ -11,6 +11,8 @@ from unittest.mock import patch
 from tests.helpers import git, init_repo
 from xiaomao.delivery_state import (annotate_project, commit_state, merged_by_content, remote_view,
                                     unpushed_commits)
+from xiaomao.git_readonly import GitReadError
+from xiaomao.inventory import metadata
 
 
 def commit(repo: Path, name: str) -> str:
@@ -35,7 +37,8 @@ def clone_with_default(root: Path, branch: str) -> Path:
 
 def project_for(repo: Path, commits: list[str], ongoing_files: list[str]) -> dict:
     head = git(repo, "rev-parse", "HEAD").stdout.strip()
-    return {"trees": [{"tree_id": "t", "path": str(repo), "head": head, "gone": False}],
+    return {"repo_id": metadata(str(repo))["repo_id"],
+            "trees": [{"tree_id": "t", "path": str(repo), "head": head, "gone": False}],
             "commits": [{"sha": sha, "tree_ids": ["t"]} for sha in commits],
             "ongoing": [{"tree_id": "t", "files": [{"path": p} for p in ongoing_files]}] if ongoing_files else []}
 
@@ -43,6 +46,16 @@ def project_for(repo: Path, commits: list[str], ongoing_files: list[str]) -> dic
 class DeliveryStateTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def independent_copies(self):
+        fresh = clone_with_default(self.root, "main")
+        stale = self.root / "stale"
+        bare = self.root / "remote.git"
+        git(self.root, "clone", str(bare), str(stale))
+        git(fresh, "remote", "set-url", "--push", "origin", str(bare))
+        for checkout in (fresh, stale):
+            git(checkout, "remote", "set-url", "origin", "https://github.com/xoqiu09/fixture.git")
+        return fresh, stale
 
     def test_four_states_with_main_default(self):
         work = clone_with_default(self.root, "main")
@@ -64,6 +77,112 @@ class DeliveryStateTests(unittest.TestCase):
         self.assertEqual(info["commits"], {merged: "merged", pushed: "pushed", local: "local"})
         self.assertEqual((info["dirty_files"], info["unpushed"]), (1, [local]))
         self.assertEqual(info["errors"], [])
+
+    def test_evening_report_reconciles_fresh_and_stale_copies_in_either_order(self):
+        from xiaomao.delivery_state import annotate_bundle, unpushed_count
+        from xiaomao.feature_render import plain_next_steps, render_plain_summary
+
+        fresh, stale = self.independent_copies()
+        now = datetime(2026, 11, 28, 13, 30, tzinfo=timezone.utc)
+        with patch.dict(os.environ, {"GIT_COMMITTER_DATE": (now - timedelta(hours=1)).isoformat()}):
+            sha = commit(fresh, "notes.txt")
+        git(stale, "fetch", str(fresh), "main")
+        git(stale, "reset", "--hard", sha)
+        self.assertEqual(unpushed_commits(stale, remote_view(stale)), [sha])
+
+        for branch, state, label in (("notes", "pushed", "🔵 已推送"), ("main", "merged", "🟢 已合并")):
+            git(fresh, "push", "origin", f"HEAD:refs/heads/{branch}")
+            reports = []
+            for copies in ((fresh, stale), (stale, fresh)):
+                with self.subTest(state=state, first=copies[0].name):
+                    trees = [dict(project_for(copy, [], [])["trees"][0], tree_id=copy.name) for copy in copies]
+                    project = {
+                        "project_id": "notes", "repo_id": metadata(str(fresh))["repo_id"],
+                        "display_name": "笔记", "changed": True,
+                        "trees": trees, "activity": [], "ongoing": [], "gaps": [], "limitations": [],
+                        "commits": [{"sha": sha, "subject": "添加读书笔记", "evidence_id": f"commit:notes:{sha}",
+                                     "tree_ids": [copy.name for copy in copies]}],
+                    }
+                    bundle = {"window": {"date": "2026-11-28", "end": now.isoformat()},
+                              "inventory_errors": [], "projects": [project]}
+                    annotate_bundle(bundle)
+                    text = render_plain_summary(bundle, {})
+                    reports.append(text)
+                    self.assertEqual(unpushed_count(project["delivery_state"]), (0, False))
+                    self.assertIn(f"添加读书笔记  {label}", text)
+                    self.assertNotIn("提交还没推送", text)
+                    self.assertFalse(any("推送本地" in step for step in plain_next_steps(bundle)))
+
+                    project["commits"] = []
+                    annotate_bundle(bundle)
+                    self.assertEqual(unpushed_count(project["delivery_state"]), (0, False))
+            with self.subTest(state=state, check="copy order"):
+                self.assertEqual(reports[0], reports[1])
+
+    def test_fork_in_registered_slot_does_not_lend_remote_refs(self):
+        work, fork = self.independent_copies()
+        sha = commit(work, "notes.txt")
+        git(fork, "fetch", str(work), "main")
+        git(fork, "update-ref", "refs/remotes/origin/main", "FETCH_HEAD")
+        git(fork, "remote", "set-url", "origin", "https://github.com/xoqiu09/fixture-fork.git")
+        self.assertEqual(commit_state(fork, sha, remote_view(fork)), "merged")
+
+        project = project_for(work, [sha], [])
+        # Daily bundles keep a placeholder for registered paths whose identity has changed.
+        project["trees"].append(dict(tree_id="fork", path=str(fork), head=None, status="unobserved"))
+        info = annotate_project(project)
+
+        self.assertEqual((info["commits"][sha], info["unpushed"]), ("local", [sha]))
+
+    def test_content_merge_uses_each_copys_default_branch_in_either_order(self):
+        fresh, stale = self.independent_copies()
+        git(stale, "switch", "-c", "notes")
+        sha = commit(stale, "notes.txt")
+        git(fresh, "fetch", str(stale), "notes")
+        git(fresh, "switch", "-c", "trunk")
+        git(fresh, "cherry-pick", "-x", sha)
+        git(fresh, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+        git(fresh, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+        self.assertFalse(merged_by_content(stale, sha, remote_view(stale)))
+        self.assertTrue(merged_by_content(fresh, sha, remote_view(fresh)))
+
+        for first, second in ((stale, fresh), (fresh, stale)):
+            with self.subTest(first=first.name):
+                project = project_for(first, [sha], [])
+                project["trees"].append(dict(project_for(second, [], [])["trees"][0], tree_id="second"))
+                info = annotate_project(project)
+                self.assertEqual((info["commits"][sha], info["unpushed"], info["merged_by_content"]),
+                                 ("merged", [], [sha]))
+                with (patch("xiaomao.delivery_state.MAX_CONTENT_CHECKS", 1),
+                      patch("xiaomao.delivery_state.merged_by_content", wraps=merged_by_content) as check):
+                    limited = annotate_project(project)
+                self.assertEqual(check.call_count, 1)
+                self.assertEqual(limited["unpushed_unchecked"], [sha])
+                self.assertIn("content_check_truncated", limited["errors"])
+
+    def test_remote_read_failure_in_one_copy_keeps_other_copys_merge_evidence(self):
+        fresh, stale = self.independent_copies()
+        sha = commit(fresh, "notes.txt")
+        git(stale, "fetch", str(fresh), "main")
+        git(stale, "reset", "--hard", sha)
+        git(fresh, "push", "origin", "main")
+        self.assertEqual(unpushed_commits(stale, remote_view(stale)), [sha])
+
+        def fail_on_stale_copy(path):
+            if path.resolve() == stale.resolve():
+                raise GitReadError("temporary remote read failure")
+            return remote_view(path)
+
+        for first, second in ((stale, fresh), (fresh, stale)):
+            with self.subTest(first=first.name):
+                project = project_for(first, [sha], [])
+                project["trees"][0]["tree_id"] = first.name
+                project["trees"].append(dict(project_for(second, [], [])["trees"][0], tree_id=second.name))
+                project["commits"][0]["tree_ids"] = [first.name, second.name]
+                with patch("xiaomao.delivery_state.remote_view", side_effect=fail_on_stale_copy):
+                    info = annotate_project(project)
+                self.assertEqual((info["commits"].get(sha), info["unpushed"]), ("merged", []))
+                self.assertIn("remote_view_unavailable:stale", info["errors"])
 
     def test_default_branch_not_main(self):
         work = clone_with_default(self.root, "trunk")

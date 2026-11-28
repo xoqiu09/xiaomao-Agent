@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS daily_notifications (
 );
 """
 COMMIT_BATCH = 512
+COMMIT_HISTORY_GAP = "commit_history_unavailable: missing previous commit"
 
 
 def stamp(value: str) -> str:
@@ -94,11 +95,23 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
     if previous and frontier:
         listing = run_git(path, "rev-list", "--reverse", "--topo-order", *frontier,
                           *(["--not", *known] if known else []), check=False)
-        if listing.returncode:
+        if listing.returncode and known:
+            tips = run_git(path, "rev-list", "--no-walk", "--missing=print",
+                           *sorted(set(known + frontier)), check=False)
+            missing = {line[1:] for line in tips.stdout.splitlines() if line.startswith("?")}
+            if not tips.returncode and missing and missing.isdisjoint(frontier):
+                surviving = [oid for oid in known if oid not in missing]
+                # With no surviving baseline, start at the current tips without importing old history.
+                listing = (run_git(path, "rev-list", "--reverse", "--topo-order", *frontier,
+                                   "--not", *surviving, check=False) if surviving else None)
+                if listing is None or not listing.returncode:
+                    known = surviving
+                    state["limitations"].append(COMMIT_HISTORY_GAP)
+        if listing is not None and listing.returncode:
             state["limitations"].append("commit_history_unavailable")
             frontier = known
         else:
-            pending = listing.stdout.split()
+            pending = listing.stdout.split() if listing is not None else []
             for oid in pending[:COMMIT_BATCH]:
                 # Reads and Git only here; writes are queued for one short transaction.
                 cached = conn.execute("SELECT payload_json FROM daily_commits WHERE repo_id=? AND sha=?",
@@ -125,6 +138,8 @@ def record_snapshot(conn, cfg, project, wt, snap, observed_at: str, observation_
             if len(pending) > COMMIT_BATCH:
                 frontier = sorted(set(known + pending[:COMMIT_BATCH]))
                 state["limitations"].append(f"commit_backlog: {len(pending) - COMMIT_BATCH}")
+    elif previous:
+        frontier = known  # An empty checkout has no history to compare yet.
     for oid, facts, effective in queued:
         conn.execute("INSERT OR IGNORE INTO daily_commits VALUES (?,?,?)",
                      (repo_id, oid, json.dumps(facts, ensure_ascii=False)))

@@ -140,6 +140,7 @@ def run_eval(
     selected: list[Sample] | None = None,
 ) -> dict[str, Any]:
     rows = []
+    usable = 0
     started = time.monotonic()
     pressure_before = host_pressure()
     for sample in selected or samples():
@@ -152,6 +153,12 @@ def run_eval(
             model=model,
         )
         scored = score_sample(sample, result)
+        if scored["ok"] and not scored["serious_factual_error"] and any(
+            item["text"].strip()
+            for section in ("interpretations", "suggestions", "unknowns")
+            for item in result["payload"][section]
+        ):
+            usable += 1
         scored["latency_s"] = round(time.monotonic() - t0, 3)
         scored["model_note_head"] = (result.get("model_note") or "")[:240]
         raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
@@ -160,14 +167,13 @@ def run_eval(
         rows.append(scored)
     elapsed = time.monotonic() - started
     serious = [r for r in rows if r["serious_factual_error"]]
-    usable = [r for r in rows if r["ok"] and not r["serious_factual_error"]]
     pressure_after = host_pressure()
     return {
         "model": model,
         "n": len(rows),
         "ok": len([r for r in rows if r["ok"]]),
         "degraded": len([r for r in rows if r["degraded"]]),
-        "usable": len(usable),
+        "usable": usable,
         "serious_factual_errors": len(serious),
         "elapsed_s": round(elapsed, 3),
         "host_pressure_before": pressure_before,
